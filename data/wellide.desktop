@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Wellide
+GenericName=VPN client
+Comment=Lightweight sing-box VPN client
+Exec=wellide %u
+Icon=wellide
+Terminal=false
+Categories=Network;
+Keywords=vpn;proxy;sing-box;vless;hiddify;
+StartupWMClass=wellide
+MimeType=x-scheme-handler/wellide;

@@ -3,6 +3,9 @@
 #include "wellide.h"
 #include <string.h>
 #include <math.h>
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#endif
 #ifdef HAVE_APPINDICATOR
 #include <libayatana-appindicator/app-indicator.h>
 #endif
@@ -1097,8 +1100,10 @@ static GtkWidget *page_settings(void)
     gtk_box_pack_start(GTK_BOX(c), st_themes, FALSE, FALSE, 4);
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Анимации", "Animations"), NULL, sw_for(&S.animations)), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Экономный режим анимации", "Economy animation mode"),
-        N_("Вращение в покое 20 кадров/с вместо частоты экрана: меньше нагрузка на процессор, но не так плавно.",
-           "Idle orbit at 20 fps instead of the display rate: less CPU, less smooth."), sw_for(&S.eco_fps)), FALSE, FALSE, 0);
+        N_("В покое кнопка вращается с частотой 20 кадров в секунду, а не с частотой экрана. "
+           "Процессор нагружается меньше, но анимация становится менее плавной.",
+           "When idle, the button spins at 20 fps instead of your display's refresh rate. "
+           "Uses less CPU, but the animation is less smooth."), sw_for(&S.eco_fps)), FALSE, FALSE, 0);
     GtkWidget *lang = gtk_combo_box_text_new();
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "auto", N_("Системный", "System"));
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "ru", "Русский");
@@ -1170,7 +1175,20 @@ static GtkWidget *page_settings(void)
 
 static void on_open_url(GtkButton *b, gpointer url)
 {
-    g_app_info_launch_default_for_uri(url, NULL, NULL);
+    GError *e = NULL;
+    GtkWidget *top = gtk_widget_get_toplevel(GTK_WIDGET(b));
+    if (gtk_show_uri_on_window(GTK_IS_WINDOW(top) ? GTK_WINDOW(top) : NULL, url, GDK_CURRENT_TIME, &e)) return;
+    g_clear_error(&e);
+#ifndef G_OS_WIN32
+    /* no default-handler registration (minimal WMs, broken portal): try xdg-open */
+    const char *argv[] = { "xdg-open", url, NULL };
+    if (g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL |
+                      G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, &e)) return;
+    g_clear_error(&e);
+#endif
+    /* last resort: put the link on the clipboard so it isn't lost */
+    gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), url, -1);
+    ui_toast(N_("Не удалось открыть браузер — ссылка скопирована", "Couldn't open a browser — link copied"));
 }
 
 static GtkWidget *page_about(void)
@@ -1552,6 +1570,26 @@ int main(int argc, char **argv)
     /* answered before GTK starts, so it works without a display (CI, ssh) */
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--version")) { printf("wellide " WL_VERSION "\n"); return 0; }
+#ifndef G_OS_WIN32
+    /* `sudo wellide` would keep settings and profiles in /root, where the
+     * normal launch never sees them, and root can't open the user's browser.
+     * TUN never needs this: the core copy has its own capability. */
+    if (geteuid() == 0 && (g_getenv("SUDO_USER") || g_getenv("PKEXEC_UID") || g_getenv("DOAS_USER"))) {
+        settings_load();
+        if (gtk_init_check(&argc, &argv)) {
+            GtkWidget *d = gtk_message_dialog_new(NULL, 0, GTK_MESSAGE_WARNING, GTK_BUTTONS_CLOSE, "%s",
+                N_("Запускайте Wellide без sudo", "Run Wellide without sudo"));
+            gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(d), "%s",
+                N_("От root настройки и подписки сохраняются в профиль root, а не в ваш, и ссылки не открываются. "
+                   "Права для TUN выдаются один раз в настройках, root для этого не нужен.",
+                   "As root, settings and subscriptions go to root's profile instead of yours, and links won't open. "
+                   "TUN permissions are granted once from Settings; root isn't needed for that."));
+            gtk_window_set_title(GTK_WINDOW(d), "Wellide");
+            gtk_dialog_run(GTK_DIALOG(d));
+        } else fprintf(stderr, "wellide: run it without sudo; TUN rights are granted from Settings\n");
+        return 1;
+    }
+#endif
     settings_load();
     app = gtk_application_new(WL_APP_ID, G_APPLICATION_HANDLES_COMMAND_LINE);
     g_signal_connect(app, "command-line", G_CALLBACK(on_command_line), NULL);

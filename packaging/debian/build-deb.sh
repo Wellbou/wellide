@@ -15,10 +15,15 @@ install -Dm755 "$SB" $R/usr/lib/wellide/sing-box
 install -Dm644 LICENSE $R/usr/share/doc/wellide/copyright
 strip --strip-unneeded $R/usr/bin/wellide
 
-# runtime deps straight from the binary
-mkdir -p build/debian && printf 'Source: wellide\n\nPackage: wellide\n' > build/debian/control
-DEPS=$(cd build && dpkg-shlibdeps -O ../$R/usr/bin/wellide 2>/dev/null | sed 's/^shlibs:Depends=//')
-rm -rf build/debian
+# runtime deps straight from the binary (dpkg-shlibdeps wants a debian/control
+# in the current directory, so run it from a scratch dir with absolute paths)
+ROOT=$(pwd)
+T=$(mktemp -d) && mkdir -p "$T/debian" && printf 'Source: wellide\n\nPackage: wellide\nArchitecture: any\n' > "$T/debian/control"
+DEPS=$(cd "$T" && dpkg-shlibdeps -O "$ROOT/$R/usr/bin/wellide" | sed -n 's/^shlibs:Depends=//p') || true
+rm -rf "$T"
+# fallback that matches Debian 12 / Ubuntu 23.04+ names
+[ -n "$DEPS" ] || DEPS="libc6 (>= 2.34), libglib2.0-0 (>= 2.74), libgtk-3-0 (>= 3.24), libjson-glib-1.0-0, libsoup-3.0-0, libcairo2, libpango-1.0-0, libayatana-appindicator3-1"
+echo "Depends: $DEPS"
 
 cat > $R/DEBIAN/control <<CTL
 Package: wellide

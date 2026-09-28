@@ -169,8 +169,7 @@ static gboolean recheck(gpointer ud)
     g_autofree char *kt = kde_proxy_type();
     g_autofree char *gm = gnome_proxy ? g_settings_get_string(gnome_proxy, "mode") : g_strdup("manual");
     if (strcmp(kt, "1") || strcmp(gm, "manual")) {
-        sysproxy_enable(watch_port);
-        ui_toast(N_("Кто-то выключил системный прокси — включил обратно", "Something reset the system proxy — restored it"));
+        sysproxy_enable(watch_port);   /* silently: nothing for the user to do */
     }
     return G_SOURCE_REMOVE;
 }

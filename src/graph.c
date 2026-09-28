@@ -66,10 +66,35 @@ static gboolean on_draw(GtkWidget *w, cairo_t *cr, gpointer ud)
     return TRUE;
 }
 
-static gboolean on_tick(GtkWidget *w, GdkFrameClock *fc, gpointer ud)
+/* glide at 30 fps only while there is data and the widget is visible;
+ * with no traffic the graph costs nothing */
+static gboolean on_timer(gpointer ud)
 {
+    GtkWidget *w = ud;
+    Graph *g = G(w);
+    if (!gtk_widget_get_mapped(w) || g->count < 2 ||
+        g_get_monotonic_time() - g->last_push > 1500000) { g->tick = 0; gtk_widget_queue_draw(w); return G_SOURCE_REMOVE; }
     gtk_widget_queue_draw(w);
     return G_SOURCE_CONTINUE;
+}
+
+static void ensure_timer(GtkWidget *w)
+{
+    Graph *g = G(w);
+    if (!g->tick && gtk_widget_get_mapped(w)) g->tick = g_timeout_add(33, on_timer, w);
+}
+
+static void on_unmap(GtkWidget *w, gpointer ud)
+{
+    Graph *g = G(w);
+    if (g->tick) { g_source_remove(g->tick); g->tick = 0; }
+}
+
+static void graph_free(gpointer p)
+{
+    Graph *g = p;
+    if (g->tick) g_source_remove(g->tick);
+    g_free(g);
 }
 
 GtkWidget *graph_new(void)
@@ -79,10 +104,10 @@ GtkWidget *graph_new(void)
     gdk_rgba_parse(&g->cu, "#ca31cc");
     gdk_rgba_parse(&g->cd, "#7c4dff");
     gdk_rgba_parse(&g->cg, "#444444");
-    g_object_set_data_full(G_OBJECT(w), KEY, g, g_free);
+    g_object_set_data_full(G_OBJECT(w), KEY, g, graph_free);
     gtk_widget_set_size_request(w, -1, 56);
     g_signal_connect(w, "draw", G_CALLBACK(on_draw), NULL);
-    g->tick = gtk_widget_add_tick_callback(w, on_tick, NULL, NULL);
+    g_signal_connect(w, "unmap", G_CALLBACK(on_unmap), NULL);
     return w;
 }
 
@@ -94,6 +119,7 @@ void graph_push(GtkWidget *w, gint64 up, gint64 down)
     g->head = (g->head + 1) % SAMPLES;
     if (g->count < SAMPLES) g->count++;
     g->last_push = g_get_monotonic_time();
+    ensure_timer(w);
 }
 
 void graph_clear(GtkWidget *w)
@@ -101,6 +127,7 @@ void graph_clear(GtkWidget *w)
     Graph *g = G(w);
     g->count = 0;
     g->scale = 0;
+    if (g->tick) { g_source_remove(g->tick); g->tick = 0; }
     gtk_widget_queue_draw(w);
 }
 

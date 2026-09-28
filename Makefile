@@ -63,3 +63,10 @@ clean:
 	rm -rf build wellide wellide.exe
 
 .PHONY: install uninstall clean art
+
+# offline renderer for README art (links everything except main.c)
+tools/render: tools/render.c $(filter-out build/main.o,$(OBJ)) build/stub.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+build/stub.o: tools/stub.c src/wellide.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<

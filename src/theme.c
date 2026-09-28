@@ -24,6 +24,7 @@
  *   outline=false        ; hard ink outlines + offset shadows ("paper" look)
  *   radius=14            ; corner radius of cards, px
  *   pixel=false          ; square corners + stepped pixel borders everywhere
+ *   button=pixel         ; connect button look: pixel | sketch | nebula | dial
  *
  *   [css]
  *   extra=.h1 { letter-spacing: 2px; }   ; appended GTK CSS
@@ -46,10 +47,13 @@ static void theme_free(Theme *t)
     g_free(t);
 }
 
+static const char *BUTTONS[] = { "pixel", "sketch", "nebula", "dial", NULL };
+
 static Theme *mk(const char *id, const char *name, const char *const cols[TC_N],
-                 gboolean ruled, gboolean outline, gboolean pixel, int radius)
+                 gboolean ruled, gboolean outline, gboolean pixel, int radius, ButtonStyle btn)
 {
     Theme *t = g_new0(Theme, 1);
+    t->button = btn;
     t->id = g_strdup(id);
     t->name = g_strdup(name);
     for (int i = 0; i < TC_N; i++) t->c[i] = g_strdup(cols[i]);
@@ -69,18 +73,18 @@ static void add_builtins(void)
         "#0c0a10", "#110e17", "#17131f", "#efe6f2", "#8e7f99", "#ca31cc", "#ffffff",
         "#2a2233", "#ff4f7b", "#222222", "#ca31cc", "#000000", "#000000" };
     static const char *notebook[TC_N] = {
-        "#fdfdf8", "#f6f6ee", "#ffffff", "#1d2433", "#6b7385", "#1d2433", "#ffffff",
-        "#c9cfdb", "#d0342c", "#222222", "#ca31cc", "#c7d8f4", "#e05a5a" };
+        "#fdfdf8", "#f3f1e7", "#ffffff", "#1d2433", "#5d6577", "#1d2433", "#ffffff",
+        "#b9c0cf", "#d0342c", "#1d2433", "#b0209f", "#c7d8f4", "#e05a5a" };
     static const char *purple[TC_N] = {
         "#130a22", "#1c1030", "#241540", "#ede7f6", "#a594c4", "#ab47bc", "#ffffff",
         "#3b2960", "#ff5277", "#2a1f38", "#ca31cc", "#000000", "#000000" };
     static const char *graphite[TC_N] = {
         "#1b1b1d", "#222225", "#2a2a2e", "#ececec", "#9a9aa2", "#ca31cc", "#ffffff",
         "#3a3a40", "#ff5c5c", "#101012", "#ca31cc", "#000000", "#000000" };
-    g_ptr_array_add(THEMES, mk("void", "Void", voidp, FALSE, FALSE, TRUE, 0));
-    g_ptr_array_add(THEMES, mk("notebook", N_("Тетрадь", "Notebook"), notebook, TRUE, TRUE, FALSE, 4));
-    g_ptr_array_add(THEMES, mk("purple", N_("Фиолетовая", "Purple"), purple, FALSE, FALSE, FALSE, 14));
-    g_ptr_array_add(THEMES, mk("graphite", N_("Графит", "Graphite"), graphite, FALSE, FALSE, FALSE, 10));
+    g_ptr_array_add(THEMES, mk("void", "Void", voidp, FALSE, FALSE, TRUE, 0, BTN_PIXEL));
+    g_ptr_array_add(THEMES, mk("notebook", N_("Тетрадь", "Notebook"), notebook, TRUE, TRUE, FALSE, 4, BTN_SKETCH));
+    g_ptr_array_add(THEMES, mk("purple", N_("Фиолетовая", "Purple"), purple, FALSE, FALSE, FALSE, 14, BTN_NEBULA));
+    g_ptr_array_add(THEMES, mk("graphite", N_("Графит", "Graphite"), graphite, FALSE, FALSE, FALSE, 10, BTN_DIAL));
 }
 
 char *themes_dir(void)
@@ -135,6 +139,10 @@ static void load_user_theme(const char *dir, const char *file)
     t->radius = g_key_file_get_integer(kf, "theme", "radius", &e);
     if (e) { t->radius = base->radius; g_clear_error(&e); }
     t->radius = CLAMP(t->radius, 0, 40);
+    t->button = base->button;
+    g_autofree char *bs = g_key_file_get_string(kf, "theme", "button", NULL);
+    for (int i = 0; bs && BUTTONS[i]; i++)
+        if (!g_ascii_strcasecmp(bs, BUTTONS[i])) t->button = i;
 
     GString *css = g_string_new(NULL);
     g_autofree char *extra = g_key_file_get_string(kf, "css", "extra", NULL);
@@ -297,8 +305,27 @@ char *theme_css(const Theme *t)
         "scrollbar, scrolledwindow, viewport { background-color: transparent; border: none; }\n"
         ".toast { background-color: %s; border-radius: 10px; padding: 8px 14px; }\n"
         ".toast label { color: %s; }\n"
-        "menu, .menu, popover { background-color: %s; color: %s; }\n",
-        C(TC_LINE), C(TC_ACCENT), C(TC_LINE), C(TC_ACCENT), C(TC_FG), C(TC_BG), C(TC_CARD), C(TC_FG));
+        "menu, .menu, popover, .popup, window.popup, menu.background { background-color: %s; color: %s;"
+        "   border: 1px solid %s; }\n"
+        "menu menuitem, .menu menuitem, popover modelbutton { color: %s; padding: 6px 12px; }\n"
+        "menu menuitem label, popover modelbutton label, menu menuitem cellview { color: %s; }\n"
+        "menu menuitem:hover, popover modelbutton:hover { background-color: %s; }\n"
+        "menu menuitem:hover label, menu menuitem:hover cellview { color: %s; }\n"
+        "combobox button, combobox button label, combobox cellview, combobox arrow,"
+        "spinbutton entry, spinbutton button { color: %s; }\n"
+        "combobox button { background-color: %s; padding: 4px 10px; }\n"
+        "combobox button:hover { border-color: %s; }\n"
+        "tooltip, tooltip.background { background-color: %s; color: %s; }\n"
+        "tooltip label { color: %s; }\n"
+        ".theme-card { background: none; border: 2px solid %s; padding: 6px; }\n"
+        ".theme-card:hover { border-color: alpha(%s, 0.6); }\n"
+        ".theme-card.active { border-color: %s; }\n"
+        ".theme-card label { color: %s; font-weight: 700; }\n"
+        ".about-title { font-size: 30px; font-weight: 800; }\n",
+        C(TC_LINE), C(TC_ACCENT), C(TC_LINE), C(TC_ACCENT), C(TC_FG), C(TC_BG),
+        C(TC_CARD), C(TC_FG), C(TC_LINE), C(TC_FG), C(TC_FG), C(TC_ACCENT), C(TC_ACCENT_FG),
+        C(TC_FG), C(TC_CARD), C(TC_ACCENT), C(TC_FG), C(TC_BG), C(TC_BG), C(TC_LINE), C(TC_ACCENT),
+        C(TC_ACCENT), C(TC_FG));
 
     if (t->ruled) {
         /* notebook paper: ruling every 28px, red margin line */

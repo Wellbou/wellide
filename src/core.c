@@ -92,15 +92,29 @@ static void on_setup_done(GObject *src, GAsyncResult *res, gpointer ud)
     g_object_unref(src);
 }
 
-static const char POLKIT_RULE[] =
-    "// Wellide TUN: let members of the wellide group set DNS on the tunnel\n"
+/* polkit checks the groups of the *running* session, so a group freshly
+ * added by setup would only work after logging in again. Each user who
+ * runs setup therefore also gets a per-user rule that works immediately. */
+static const char POLKIT_GROUP_RULE[] =
+    "// Wellide TUN: sing-box sets DNS on its tunnel via systemd-resolved\n"
     "polkit.addRule(function(action, subject) {\n"
-    "    if (action.id.indexOf(\"org.freedesktop.resolve1.set-\") == 0 ||\n"
-    "        action.id == \"org.freedesktop.resolve1.revert\") {\n"
-    "        if (subject.local && subject.active && subject.isInGroup(\"wellide\"))\n"
-    "            return polkit.Result.YES;\n"
-    "    }\n"
+    "    if ((action.id.indexOf(\"org.freedesktop.resolve1.set-\") == 0 ||\n"
+    "         action.id == \"org.freedesktop.resolve1.revert\") &&\n"
+    "        subject.local && subject.active && subject.isInGroup(\"wellide\"))\n"
+    "        return polkit.Result.YES;\n"
     "});";
+
+static char *polkit_user_rule(const char *user)
+{
+    return g_strdup_printf(
+        "// Wellide TUN for %s (works before re-login; see 49-wellide.rules)\n"
+        "polkit.addRule(function(action, subject) {\n"
+        "    if ((action.id.indexOf(\"org.freedesktop.resolve1.set-\") == 0 ||\n"
+        "         action.id == \"org.freedesktop.resolve1.revert\") &&\n"
+        "        subject.local && subject.active && subject.user == \"%s\")\n"
+        "        return polkit.Result.YES;\n"
+        "});", user, user);
+}
 
 void tun_setup_async(void)
 {
@@ -114,6 +128,12 @@ void tun_setup_async(void)
      * via systemd-resolved; polkit resolves groups from the user database,
      * so it works without logging out. */
     const char *user = g_get_user_name();
+    /* user names are [a-z_][a-z0-9_-]*; refuse anything that could break quoting */
+    for (const char *c = user; *c; c++)
+        if (!g_ascii_isalnum(*c) && *c != '_' && *c != '-' && *c != '.') {
+            ui_on_tun_setup(FALSE, "bad user name"); return;
+        }
+    g_autofree char *urule = polkit_user_rule(user);
     g_autofree char *script = g_strdup_printf(
         "set -e; install -D -o root -g %u -m 0750 '%s' '%s'; "
         "setcap cap_net_admin,cap_net_raw,cap_net_bind_service+ep '%s'; "
@@ -121,11 +141,12 @@ void tun_setup_async(void)
         "  getent group wellide >/dev/null || groupadd -r wellide; "
         "  usermod -aG wellide '%s'; "
         "  printf '%%s\\n' \"$0\" > /etc/polkit-1/rules.d/49-wellide.rules; "
+        "  printf '%%s\\n' \"$1\" > '/etc/polkit-1/rules.d/49-wellide-user-%s.rules'; "
         "fi",
-        (unsigned)getgid(), sb, WL_TUN_BIN, WL_TUN_BIN, user);
+        (unsigned)getgid(), sb, WL_TUN_BIN, WL_TUN_BIN, user, user);
     GError *e = NULL;
     GSubprocess *p = g_subprocess_new(G_SUBPROCESS_FLAGS_NONE, &e,
-                                      "pkexec", "/bin/sh", "-c", script, POLKIT_RULE, NULL);
+                                      "pkexec", "/bin/sh", "-c", script, POLKIT_GROUP_RULE, urule, NULL);
     if (!p) { ui_on_tun_setup(FALSE, e->message); g_error_free(e); return; }
     g_subprocess_wait_check_async(p, NULL, on_setup_done, NULL);
 #endif

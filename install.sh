@@ -35,7 +35,7 @@ if [ $UNINSTALL = 1 ]; then
     done
     for s in 16 32 48 64 128 256; do $SUDO rm -f "$PREFIX/share/icons/hicolor/${s}x${s}/apps/wellide.png"; done
     $SUDO rm -rf /usr/local/lib/wellide
-    $SUDO rm -f /etc/polkit-1/rules.d/49-wellide.rules
+    $SUDO rm -f /etc/polkit-1/rules.d/49-wellide.rules /etc/polkit-1/rules.d/49-wellide-user-*.rules
     c "done (settings kept in ~/.config/wellide)"
     exit 0
 fi
@@ -107,6 +107,9 @@ if [ $TUN = 1 ]; then
         getent group wellide >/dev/null 2>&1 || $SUDO groupadd -r wellide
         $SUDO usermod -aG wellide "$USER_NAME" 2>/dev/null || $SUDO adduser "$USER_NAME" wellide
         $SUDO install -Dm644 "$SRC/data/49-wellide.rules" /etc/polkit-1/rules.d/49-wellide.rules
+        # polkit sees the groups of the running session; this one works before re-login
+        sed "s/@USER@/$USER_NAME/g" "$SRC/data/49-wellide-user.rules.in" |
+            $SUDO tee "/etc/polkit-1/rules.d/49-wellide-user-$USER_NAME.rules" >/dev/null
     fi
 fi
 

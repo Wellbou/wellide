@@ -126,9 +126,13 @@ typedef enum {
     TC_LINE, TC_DANGER, TC_INK, TC_GLOW, TC_RULE, TC_MARGIN, TC_N
 } ThemeColor;
 
+/* every theme has its own connect button */
+typedef enum { BTN_PIXEL, BTN_SKETCH, BTN_NEBULA, BTN_DIAL } ButtonStyle;
+
 typedef struct {
     char *id, *name;
     char *c[TC_N];
+    ButtonStyle button;
     gboolean ruled, outline, pixel, builtin;
     int radius;
     char *css_extra;
@@ -141,13 +145,20 @@ const Theme *theme_current(void);
 char *theme_css(const Theme *t);
 char *themes_dir(void);
 
-/* vortex.c — the animated pixel vortex (connect button, tray-less logo) */
-GtkWidget *vortex_new(int cells);
+/* vortex.c — the connect button: arms orbit around it, gather, flash */
+GtkWidget *vortex_new(void);
+void vortex_set_theme(GtkWidget *w, const Theme *t);
 void vortex_set_state(GtkWidget *w, CoreState st);
 void vortex_set_label(GtkWidget *w, const char *text);
-void vortex_set_colors(GtkWidget *w, const char *ink, const char *glow, const char *bg);
 void vortex_set_animated(GtkWidget *w, gboolean on);
+void vortex_on_click(GtkWidget *w, void (*cb)(void));
+void vortex_paint_preview(cairo_t *cr, const Theme *t, double size);
 GdkPixbuf *vortex_icon_pixbuf(int cells, int px, const char *ink, const char *glow);
+gpointer vortex_sim_new(const Theme *t, const char *label);
+void vortex_sim_step(gpointer sim, gint64 t_us);
+void vortex_sim_state(gpointer sim, CoreState st, const char *label);
+void vortex_sim_paint(gpointer sim, cairo_t *cr, double size);
+void vortex_sim_free(gpointer sim);
 
 /* graph.c — smooth traffic sparkline */
 GtkWidget *graph_new(void);

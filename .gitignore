@@ -2,5 +2,6 @@ wellide
 wellide.exe
 build/
 tools/__pycache__/
+tools/render
 packaging/windows/dist/
 *.o

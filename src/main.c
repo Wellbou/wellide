@@ -20,7 +20,7 @@ static GtkStatusIcon *tray;
 /* home */
 static GtkWidget *h_vortex, *h_status, *h_err, *h_server, *h_ip, *h_speed, *h_total, *h_graph,
                  *h_prof_name, *h_prof_usage, *h_prof_bar, *h_prof_exp, *h_mode;
-static GtkWidget *brand_vortex;
+static GtkWidget *brand_icon;
 /* proxies */
 static GtkWidget *p_list, *p_title;
 /* profiles */
@@ -29,11 +29,12 @@ static GtkWidget *pr_list, *pr_entry, *pr_add;
 static GtkTextBuffer *log_buf;
 static int log_lines;
 /* settings */
-static GtkWidget *st_tun_btn, *st_tun_lbl, *st_theme;
+static GtkWidget *st_tun_btn, *st_tun_lbl, *st_themes;
 
 static gboolean quitting;
 static guint ping_timer;
 
+static void tray_update(void);
 static void rebuild_proxies(void);
 static void rebuild_profiles(void);
 static void refresh_home(void);
@@ -100,8 +101,12 @@ static void apply_theme(void)
     const Theme *t = theme_current();
     g_autofree char *c = theme_css(t);
     gtk_css_provider_load_from_data(css, c, -1, NULL);
-    if (h_vortex) vortex_set_colors(h_vortex, t->c[TC_INK], t->c[TC_GLOW], t->c[TC_BG]);
-    if (brand_vortex) vortex_set_colors(brand_vortex, t->c[TC_INK], t->c[TC_GLOW], t->c[TC_BG2]);
+    if (h_vortex) vortex_set_theme(h_vortex, t);
+    tray_update();
+    if (brand_icon) {
+        g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 2, t->c[TC_INK], t->c[TC_GLOW]);
+        gtk_image_set_from_pixbuf(GTK_IMAGE(brand_icon), pb);
+    }
     if (h_graph) graph_set_colors(h_graph, t->c[TC_GLOW], t->c[TC_ACCENT], t->c[TC_LINE]);
 }
 
@@ -112,9 +117,10 @@ static const char *mode_name(int m)
                            : N_("Только локальный порт", "Local port only");
 }
 
+/* the button shows the state, not the action */
 static const char *on_label(CoreState st)
 {
-    return st == ST_ON ? N_("ВЫКЛ", "OFF") : st == ST_OFF ? N_("ВКЛ", "ON") : "...";
+    return st == ST_ON ? N_("ВКЛ", "ON") : st == ST_OFF ? N_("ВЫКЛ", "OFF") : "...";
 }
 
 /* ---------- navigation ---------- */
@@ -133,6 +139,34 @@ static void on_nav(GtkButton *b, gpointer page) { go(page); }
 
 /* ---------- core callbacks ---------- */
 
+#ifdef HAVE_APPINDICATOR
+/* Tray icons are rendered by the app into ~/.cache/wellide/tray/ with the
+ * current theme colours. The name includes the colours, so Plasma (which
+ * caches icons by name) can never show a stale one. */
+static char *tray_dir;
+
+static const char *tray_icon(gboolean on)
+{
+    static char name[96];
+    const Theme *t = theme_current();
+    guint h = g_str_hash(t->c[TC_GLOW]) ^ (g_str_hash(t->c[TC_INK]) * 31) ^ (g_str_hash(WL_VERSION) * 131);
+    g_snprintf(name, sizeof name, "wellide-tray-%08x-%s", h, on ? "on" : "off");
+    if (!tray_dir) {
+        g_autofree char *c = wl_cache_dir();
+        tray_dir = g_build_filename(c, "tray", NULL);
+        g_mkdir_with_parents(tray_dir, 0700);
+    }
+    g_autofree char *file = g_strdup_printf("%s/%s.png", tray_dir, name);
+    if (!g_file_test(file, G_FILE_TEST_EXISTS)) {
+        /* 64px: whirl, dimmed when off */
+        g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 4, "#6a4a7a", t->c[TC_GLOW]);
+        if (!on) gdk_pixbuf_saturate_and_pixelate(pb, pb, 0.1, FALSE);   /* grey when off */
+        gdk_pixbuf_save(pb, file, "png", NULL, NULL);
+    }
+    return name;
+}
+#endif
+
 static void tray_update(void)
 {
     if (!tray) return;
@@ -140,7 +174,7 @@ static void tray_update(void)
 #ifdef HAVE_APPINDICATOR
     gtk_menu_item_set_label(GTK_MENU_ITEM(tray_toggle),
         st == ST_ON ? N_("Отключиться", "Disconnect") : st == ST_OFF ? N_("Подключиться", "Connect") : "…");
-    app_indicator_set_icon_full(tray, st == ST_ON ? "wellide-on" : "wellide",
+    app_indicator_set_icon_full(tray, tray_icon(st == ST_ON),
                                 st == ST_ON ? N_("Подключено", "Connected") : N_("Отключено", "Disconnected"));
 #else
     gtk_status_icon_set_tooltip_text(tray, st == ST_ON ? "Wellide — ON" : "Wellide — OFF");
@@ -159,7 +193,6 @@ void ui_on_state(CoreState st, const char *error)
     set_class(h_status, "status-off", st != ST_ON);
     vortex_set_label(h_vortex, on_label(st));
     vortex_set_state(h_vortex, st);
-    vortex_set_state(brand_vortex, st);
     if (error) {
         gtk_label_set_text(GTK_LABEL(h_err), error);
         gtk_widget_show(h_err);
@@ -280,11 +313,7 @@ static void on_connect(GtkButton *b, gpointer ud)
     }
 }
 
-static gboolean on_vortex_click(GtkWidget *w, GdkEventButton *e, gpointer ud)
-{
-    if (e->button == 1 && e->type == GDK_BUTTON_RELEASE) on_connect(NULL, NULL);
-    return TRUE;
-}
+static void on_vortex_click(void) { on_connect(NULL, NULL); }
 
 static void refresh_home(void)
 {
@@ -337,15 +366,14 @@ static GtkWidget *page_home(void)
     gtk_widget_set_halign(center, GTK_ALIGN_CENTER);
 
     /* the vortex *is* the connect button */
-    GtkWidget *ev = gtk_event_box_new();
-    h_vortex = vortex_new(21);
-    gtk_widget_set_size_request(h_vortex, 210, 210);
+    /* the vortex *is* the connect button; its arms orbit around it */
+    h_vortex = vortex_new();
+    gtk_widget_set_size_request(h_vortex, 300, 300);
     vortex_set_label(h_vortex, on_label(ST_OFF));
     vortex_set_animated(h_vortex, S.animations);
-    gtk_container_add(GTK_CONTAINER(ev), h_vortex);
-    gtk_widget_add_events(ev, GDK_BUTTON_RELEASE_MASK);
-    g_signal_connect(ev, "button-release-event", G_CALLBACK(on_vortex_click), NULL);
-    gtk_widget_set_tooltip_text(ev, N_("Подключить / отключить", "Connect / disconnect"));
+    vortex_on_click(h_vortex, on_vortex_click);
+    gtk_widget_set_tooltip_text(h_vortex, N_("Подключить / отключить", "Connect / disconnect"));
+    GtkWidget *ev = h_vortex;
     gtk_box_pack_start(GTK_BOX(center), ev, FALSE, FALSE, 0);
 
     h_status = gtk_label_new(N_("Отключено", "Disconnected"));
@@ -749,34 +777,74 @@ static GtkWidget *page_logs(void)
 
 /* ---------- settings page ---------- */
 
-static void fill_themes(void)
+/* theme picker: a card per theme with a still of its own connect button */
+static gboolean draw_preview(GtkWidget *w, cairo_t *cr, gpointer id)
 {
-    g_signal_handlers_block_matched(st_theme, G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, GINT_TO_POINTER(1));
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(st_theme));
     GPtrArray *ts = themes_list();
     for (guint i = 0; i < ts->len; i++) {
         Theme *t = ts->pdata[i];
-        g_autofree char *nm = t->builtin ? g_strdup(t->name) : g_strdup_printf("%s ✎", t->name);
-        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(st_theme), t->id, nm);
+        if (strcmp(t->id, id)) continue;
+        int W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
+        GdkRGBA bg;
+        gdk_rgba_parse(&bg, t->c[TC_BG]);
+        gdk_cairo_set_source_rgba(cr, &bg);
+        cairo_paint(cr);
+        cairo_translate(cr, (W - H) / 2.0, 0);
+        vortex_paint_preview(cr, t, H);
+        break;
     }
-    gtk_combo_box_set_active_id(GTK_COMBO_BOX(st_theme), theme_current()->id);
-    g_signal_handlers_unblock_matched(st_theme, G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, GINT_TO_POINTER(1));
+    return TRUE;
+}
+
+static void on_theme_card(GtkButton *b, gpointer ud)
+{
+    const char *id = g_object_get_data(G_OBJECT(b), "id");
+    if (!id || !g_strcmp0(S.theme, id)) return;
+    g_free(S.theme);
+    S.theme = g_strdup(id);
+    settings_save();
+    apply_theme();
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(st_themes));
+    for (GList *l = kids; l; l = l->next) {
+        GtkWidget *c = gtk_bin_get_child(GTK_BIN(l->data));   /* flowboxchild -> button */
+        set_class(c, "active", !g_strcmp0(g_object_get_data(G_OBJECT(c), "id"), id));
+    }
+    g_list_free(kids);
+}
+
+static void fill_themes(void)
+{
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(st_themes));
+    for (GList *l = kids; l; l = l->next) gtk_widget_destroy(l->data);
+    g_list_free(kids);
+    GPtrArray *ts = themes_list();
+    const char *cur = theme_current()->id;
+    for (guint i = 0; i < ts->len; i++) {
+        Theme *t = ts->pdata[i];
+        GtkWidget *b = gtk_button_new();
+        add_class(b, "theme-card");
+        if (!strcmp(t->id, cur)) add_class(b, "active");
+        g_object_set_data_full(G_OBJECT(b), "id", g_strdup(t->id), g_free);
+        GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+        GtkWidget *da = gtk_drawing_area_new();
+        gtk_widget_set_size_request(da, 128, 96);
+        g_object_set_data_full(G_OBJECT(da), "id", g_strdup(t->id), g_free);
+        g_signal_connect(da, "draw", G_CALLBACK(draw_preview), g_object_get_data(G_OBJECT(da), "id"));
+        gtk_box_pack_start(GTK_BOX(v), da, FALSE, FALSE, 0);
+        g_autofree char *nm = t->builtin ? g_strdup(t->name) : g_strdup_printf("%s ✎", t->name);
+        GtkWidget *l = gtk_label_new(nm);
+        gtk_box_pack_start(GTK_BOX(v), l, FALSE, FALSE, 0);
+        gtk_container_add(GTK_CONTAINER(b), v);
+        g_signal_connect(b, "clicked", G_CALLBACK(on_theme_card), NULL);
+        gtk_flow_box_insert(GTK_FLOW_BOX(st_themes), b, -1);
+    }
+    gtk_widget_show_all(st_themes);
 }
 
 static void on_themes_changed(void)
 {
     apply_theme();
-    if (st_theme) fill_themes();
-}
-
-static void on_theme(GtkComboBox *c, gpointer ud)
-{
-    const char *id = gtk_combo_box_get_active_id(c);
-    if (!id) return;
-    g_free(S.theme);
-    S.theme = g_strdup(id);
-    settings_save();
-    apply_theme();
+    if (st_themes) fill_themes();
 }
 
 static void on_open_themes(GtkButton *b, gpointer ud)
@@ -828,7 +896,6 @@ static void on_bool(GtkSwitch *sw, GParamSpec *ps, gpointer field)
     if (field == &S.auto_skip_region) { rebuild_proxies(); core_restart(); }
     if (field == &S.animations) {
         vortex_set_animated(h_vortex, S.animations);
-        vortex_set_animated(brand_vortex, S.animations);
         gtk_stack_set_transition_type(GTK_STACK(stack), S.animations
             ? GTK_STACK_TRANSITION_TYPE_CROSSFADE : GTK_STACK_TRANSITION_TYPE_NONE);
     }
@@ -886,15 +953,26 @@ static GtkWidget *page_settings(void)
 
     /* look */
     GtkWidget *c = card();
-    GtkWidget *tb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    st_theme = gtk_combo_box_text_new();
+    GtkWidget *thdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *tv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_pack_start(GTK_BOX(tv), label(N_("Тема", "Theme"), "h2"), FALSE, FALSE, 0);
+    GtkWidget *thint = label(N_("У каждой темы своя кнопка. Свои темы — .ini файлы в папке тем, подхватываются на лету.",
+                                "Every theme has its own button. Custom themes are .ini files in the themes folder, applied live."), "dim");
+    gtk_label_set_line_wrap(GTK_LABEL(thint), TRUE);
+    gtk_box_pack_start(GTK_BOX(tv), thint, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(thdr), tv, TRUE, TRUE, 0);
+    GtkWidget *ob = btn(N_("Папка тем…", "Themes folder…"), "flat-btn", G_CALLBACK(on_open_themes), NULL);
+    gtk_widget_set_valign(ob, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(thdr), ob, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), thdr, FALSE, FALSE, 0);
+    st_themes = gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(st_themes), GTK_SELECTION_NONE);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(st_themes), TRUE);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(st_themes), 6);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(st_themes), 10);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(st_themes), 10);
     fill_themes();
-    g_signal_connect(st_theme, "changed", G_CALLBACK(on_theme), GINT_TO_POINTER(1));
-    gtk_box_pack_start(GTK_BOX(tb), st_theme, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(tb), btn(N_("Свои темы…", "Custom themes…"), "flat-btn", G_CALLBACK(on_open_themes), NULL), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Тема", "Theme"),
-        N_("Свои темы — .ini файлы в папке тем, подхватываются на лету (пример: example.ini.sample).",
-           "Custom themes are .ini files in the themes folder, applied live (see example.ini.sample)."), tb), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), st_themes, FALSE, FALSE, 4);
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Анимации", "Animations"), NULL, sw_for(&S.animations)), FALSE, FALSE, 0);
     GtkWidget *lang = gtk_combo_box_text_new();
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "auto", N_("Системный", "System"));
@@ -963,7 +1041,87 @@ static GtkWidget *page_settings(void)
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Порт Clash API", "Clash API port"), NULL, aport), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
 
-    gtk_box_pack_start(GTK_BOX(box), label("Wellide " WL_VERSION " · sing-box · " WL_REPO, "dim"), FALSE, FALSE, 4);
+    gtk_container_add(GTK_CONTAINER(outer), box);
+    return outer;
+}
+
+/* ---------- about page ---------- */
+
+static void on_open_url(GtkButton *b, gpointer url)
+{
+    g_app_info_launch_default_for_uri(url, NULL, NULL);
+}
+
+static GtkWidget *page_about(void)
+{
+    GtkWidget *outer = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 28);
+
+    GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+    const Theme *th = theme_current();
+    g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 5, th->c[TC_INK], th->c[TC_GLOW]);
+    gtk_box_pack_start(GTK_BOX(head), gtk_image_new_from_pixbuf(pb), FALSE, FALSE, 0);
+    GtkWidget *tv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_valign(tv, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(tv), label("Wellide", "about-title"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tv), label(N_("версия " WL_VERSION " · MIT", "version " WL_VERSION " · MIT"), "dim"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(head), tv, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), head, FALSE, FALSE, 0);
+
+    const char *paras[] = {
+        N_("Wellide — лёгкий VPN-клиент. Сам он — только окно на GTK, написанное на C; "
+           "всю работу с сетью делает ядро sing-box. Вместе они занимают около 125 МБ памяти, "
+           "а в фоне почти не нагружают процессор.",
+           "Wellide is a lightweight VPN client. The app itself is just a small GTK window written in C; "
+           "all networking is done by the sing-box core. Together they use about 125 MB of RAM and next to "
+           "no CPU in the background."),
+        N_("Добавьте подписку или ключ, нажмите на кнопку — и всё. «Авто» сам выберет самый быстрый сервер "
+           "и будет проверять его каждые две минуты. Пинг до серверов обновляется сам.",
+           "Add a subscription or a key and press the button — that's it. “Auto” picks the fastest server "
+           "and re-checks it every two minutes. Server pings refresh on their own."),
+        N_("Режим TUN пропускает через VPN весь трафик системы. Сайты своей страны (банки, госуслуги, "
+           "местные сервисы) можно пустить напрямую. Wellide не запускается с правами root: права на "
+           "TUN получает только отдельная копия ядра.",
+           "TUN mode sends all system traffic through the VPN. Sites of your own country (banks, "
+           "government, local services) can go direct. Wellide never runs as root: only a separate copy "
+           "of the core gets the TUN permission."),
+        N_("Wellide ничего не собирает и никуда не отправляет. Подписки и настройки хранятся только у вас "
+           "на компьютере.",
+           "Wellide collects nothing and sends nothing anywhere. Subscriptions and settings stay on your computer."),
+    };
+    GtkWidget *c = card();
+    for (guint i = 0; i < G_N_ELEMENTS(paras); i++) {
+        GtkWidget *l = label(paras[i], NULL);
+        gtk_label_set_line_wrap(GTK_LABEL(l), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(l), 80);
+        gtk_widget_set_margin_bottom(l, 6);
+        gtk_box_pack_start(GTK_BOX(c), l, FALSE, FALSE, 0);
+    }
+    gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
+
+    c = card();
+    gtk_box_pack_start(GTK_BOX(c), label(N_("Под капотом", "Under the hood"), "h2"), FALSE, FALSE, 0);
+    g_autofree char *core = g_strdup_printf(N_("Ядро: %s", "Core: %s"), core_bin());
+    gtk_box_pack_start(GTK_BOX(c), label(core, "dim"), FALSE, FALSE, 0);
+    g_autofree char *gtkv = g_strdup_printf("GTK %u.%u.%u · GLib %u.%u · libsoup %u.%u",
+        gtk_get_major_version(), gtk_get_minor_version(), gtk_get_micro_version(),
+        glib_major_version, glib_minor_version, soup_get_major_version(), soup_get_minor_version());
+    gtk_box_pack_start(GTK_BOX(c), label(gtkv, "dim"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), label(N_("Правила маршрутизации: SagerNet sing-geoip / sing-geosite",
+                                            "Routing rules: SagerNet sing-geoip / sing-geosite"), "dim"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
+
+    GtkWidget *links = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_pack_start(GTK_BOX(links), btn("GitHub", "accent-btn", G_CALLBACK(on_open_url), WL_REPO), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(links), btn(N_("Сообщить об ошибке", "Report a bug"), "flat-btn",
+                                           G_CALLBACK(on_open_url), WL_REPO "/issues"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(links), btn("sing-box", "flat-btn", G_CALLBACK(on_open_url),
+                                           "https://github.com/SagerNet/sing-box"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), links, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(box), label("© 2026 Wellbou", "dim"), FALSE, FALSE, 0);
+
     gtk_container_add(GTK_CONTAINER(outer), box);
     return outer;
 }
@@ -996,7 +1154,9 @@ static void on_tray_quit(GtkMenuItem *i, gpointer ud) { do_quit(); }
 
 static void build_tray(void)
 {
-    tray = app_indicator_new("wellide", "wellide", APP_INDICATOR_CATEGORY_COMMUNICATIONS);
+    const char *icon = tray_icon(FALSE);
+    tray = app_indicator_new("wellide", icon, APP_INDICATOR_CATEGORY_COMMUNICATIONS);
+    app_indicator_set_icon_theme_path(tray, tray_dir);
     app_indicator_set_status(tray, APP_INDICATOR_STATUS_ACTIVE);
     app_indicator_set_title(tray, "Wellide");
     GtkWidget *m = gtk_menu_new();
@@ -1105,10 +1265,8 @@ static void on_activate(GtkApplication *a, gpointer ud)
 
     GtkWidget *brand = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     add_class(brand, "brand");
-    brand_vortex = vortex_new(11);
-    gtk_widget_set_size_request(brand_vortex, 33, 33);
-    vortex_set_animated(brand_vortex, S.animations);
-    gtk_box_pack_start(GTK_BOX(brand), brand_vortex, FALSE, FALSE, 0);
+    brand_icon = gtk_image_new();
+    gtk_box_pack_start(GTK_BOX(brand), brand_icon, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(brand), label("wellide", NULL), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(side), brand, FALSE, FALSE, 0);
 
@@ -1117,6 +1275,7 @@ static void on_activate(GtkApplication *a, gpointer ud)
     nav_button(side, "▤", N_("Профили", "Profiles"), "profiles");
     nav_button(side, "›_", N_("Логи", "Logs"), "logs");
     nav_button(side, "⚙", N_("Настройки", "Settings"), "settings");
+    nav_button(side, "?", N_("О программе", "About"), "about");
     GtkWidget *quit = btn(N_("Выход", "Quit"), "flat-btn", G_CALLBACK(do_quit), NULL);
     gtk_box_pack_end(GTK_BOX(side), quit, FALSE, FALSE, 4);
     gtk_box_pack_start(GTK_BOX(root), side, FALSE, FALSE, 0);
@@ -1131,6 +1290,7 @@ static void on_activate(GtkApplication *a, gpointer ud)
     gtk_stack_add_named(GTK_STACK(stack), page_profiles(), "profiles");
     gtk_stack_add_named(GTK_STACK(stack), page_logs(), "logs");
     gtk_stack_add_named(GTK_STACK(stack), page_settings(), "settings");
+    gtk_stack_add_named(GTK_STACK(stack), page_about(), "about");
     gtk_box_pack_start(GTK_BOX(root), stack, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(overlay), root);
 

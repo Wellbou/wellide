@@ -1549,6 +1549,9 @@ static G_GNUC_UNUSED gboolean on_signal(gpointer ud)
 
 int main(int argc, char **argv)
 {
+    /* answered before GTK starts, so it works without a display (CI, ssh) */
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--version")) { printf("wellide " WL_VERSION "\n"); return 0; }
     settings_load();
     app = gtk_application_new(WL_APP_ID, G_APPLICATION_HANDLES_COMMAND_LINE);
     g_signal_connect(app, "command-line", G_CALLBACK(on_command_line), NULL);

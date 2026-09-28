@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/Wellbou/wellide/main/install.sh | s
 
 The script installs the build dependencies and sing-box, builds Wellide, and grants TUN rights to a separate copy of the core. Wellide itself never runs as root. Flags: `sh -s -- --no-tun` skips the TUN step, `--uninstall` removes Wellide.
 
+**Debian 12+ / Ubuntu 23.04+ / Mint 22+:** get `wellide_x.y.z_amd64.deb` from [Releases](https://github.com/Wellbou/wellide/releases) and install it with `sudo apt install ./wellide_*.deb`. sing-box is included; TUN rights are granted from Settings on first use.
+
 **Windows 10/11:** get `wellide-x.y.z-setup.exe` from [Releases](https://github.com/Wellbou/wellide/releases). It already includes sing-box and wintun.
 
 ## The button

@@ -13,6 +13,10 @@
 #define WL_VERSION "0.2.0"
 #define WL_APP_ID  "io.github.wellbou.wellide"
 #define WL_REPO    "https://github.com/Wellbou/wellide"
+/* sing-box shipped inside the .deb (no capabilities; TUN setup copies it) */
+#ifndef WL_BUNDLED_CORE
+#define WL_BUNDLED_CORE "/usr/lib/wellide/sing-box"
+#endif
 #ifndef WL_TUN_BIN
 #define WL_TUN_BIN "/usr/local/lib/wellide/sing-box"
 #endif

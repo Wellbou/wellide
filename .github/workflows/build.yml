@@ -23,6 +23,29 @@ jobs:
       - run: make -j4 CFLAGS="-O2 -Werror"
       - run: ./wellide --version
 
+  deb:
+    # Debian 12 base: the .deb then runs on Debian 12+, Ubuntu 23.04+, Mint 22+
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends build-essential pkg-config dpkg-dev curl ca-certificates \
+            libgtk-3-dev libjson-glib-dev libsoup-3.0-dev libayatana-appindicator3-dev
+      - run: |
+          curl -fsSL https://github.com/SagerNet/sing-box/releases/download/v$SINGBOX_VERSION/sing-box-$SINGBOX_VERSION-linux-amd64.tar.gz | tar -xz
+          packaging/debian/build-deb.sh sing-box-$SINGBOX_VERSION-linux-amd64/sing-box
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wellide-deb
+          path: wellide_*.deb
+      - name: release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wellide_*.deb
+
   windows:
     runs-on: windows-latest
     defaults:

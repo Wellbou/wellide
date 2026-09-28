@@ -66,6 +66,7 @@ const char *core_bin(void)
     if (!g_file_test(bin, G_FILE_TEST_EXISTS)) { g_free(bin); bin = g_strdup("sing-box.exe"); }
 #else
     bin = g_find_program_in_path("sing-box");
+    if (!bin && g_file_test(WL_BUNDLED_CORE, G_FILE_TEST_IS_EXECUTABLE)) bin = g_strdup(WL_BUNDLED_CORE);
     if (!bin && g_file_test(WL_TUN_BIN, G_FILE_TEST_IS_EXECUTABLE)) bin = g_strdup(WL_TUN_BIN);
     if (!bin) bin = g_strdup("sing-box");
 #endif
@@ -128,6 +129,7 @@ void tun_setup_async(void)
     ui_on_tun_setup(TRUE, N_("TUN готов", "TUN is ready"));
 #else
     g_autofree char *sb = g_find_program_in_path("sing-box");
+    if (!sb && g_file_test(WL_BUNDLED_CORE, G_FILE_TEST_IS_EXECUTABLE)) sb = g_strdup(WL_BUNDLED_CORE);
     if (!sb) { ui_on_tun_setup(FALSE, N_("sing-box не найден в PATH", "sing-box not found in PATH")); return; }
     /* The capable copy is group-restricted (0750, the user's own group).
      * The polkit rule lets members of "wellide" set DNS on the TUN link

@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/Wellbou/wellide/main/install.sh | s
 
 Скрипт ставит зависимости для сборки и sing-box, собирает Wellide и выдаёт права для TUN отдельной копии ядра. Сам Wellide никогда не работает от root. Флаги: `sh -s -- --no-tun` пропускает шаг с TUN, `--uninstall` удаляет Wellide.
 
+**Debian 12+ / Ubuntu 23.04+ / Mint 22+:** скачайте `wellide_x.y.z_amd64.deb` из [Releases](https://github.com/Wellbou/wellide/releases) и установите: `sudo apt install ./wellide_*.deb`. sing-box уже внутри; права для TUN выдаются в настройках при первом включении.
+
 **Windows 10/11:** скачайте `wellide-x.y.z-setup.exe` из [Releases](https://github.com/Wellbou/wellide/releases). sing-box и wintun уже внутри.
 
 ## Кнопка

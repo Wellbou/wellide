@@ -136,7 +136,7 @@ void profiles_load(void)
         JsonObject *o = json_array_get_object_element(a, i);
         Profile *p = g_new0(Profile, 1);
         p->id = g_strdup(json_object_get_string_member_with_default(o, "id", ""));
-        p->name = g_strdup(json_object_get_string_member_with_default(o, "name", "Профиль"));
+        p->name = g_strdup(json_object_get_string_member_with_default(o, "name", "Profile"));
         const char *url = json_object_get_string_member_with_default(o, "url", NULL);
         p->url = url ? g_strdup(url) : NULL;
         p->upload = json_object_get_int_member_with_default(o, "upload", 0);
@@ -223,7 +223,7 @@ static void finish_profile(Fetch *f, const char *body, SoupMessageHeaders *h)
     Profile *p = f->p;
     g_autoptr(GPtrArray) test = links_parse(body);
     if (test->len == 0) {
-        f->cb(NULL, "в подписке не нашлось поддерживаемых серверов", f->ud);
+        f->cb(NULL, N_("в подписке не нашлось поддерживаемых серверов", "no supported servers in this subscription"), f->ud);
         if (f->is_new) profile_free(p);
         return;
     }
@@ -276,7 +276,7 @@ static void fetch(Fetch *f)
 {
     f->msg = soup_message_new("GET", f->p->url);
     if (!f->msg) {
-        f->cb(NULL, "неверная ссылка", f->ud);
+        f->cb(NULL, N_("неверная ссылка", "invalid link"), f->ud);
         if (f->is_new) profile_free(f->p);
         g_free(f);
         return;
@@ -308,12 +308,12 @@ void profile_add_async(const char *input, ProfileDoneCb cb, gpointer ud)
         if (!p->name || !*p->name) {
             g_free(p->name);
             g_autoptr(GUri) u = g_uri_parse(in, G_URI_FLAGS_NONE, NULL);
-            p->name = g_strdup(u && g_uri_get_host(u) ? g_uri_get_host(u) : "Подписка");
+            p->name = g_strdup(u && g_uri_get_host(u) ? g_uri_get_host(u) : N_("Подписка", "Subscription"));
         }
         p->url = g_strdup(in);
         fetch(f);
     } else {
-        p->name = g_strdup("Мои ссылки");
+        p->name = g_strdup(N_("Мои ссылки", "My links"));
         finish_profile(f, in, NULL);
         g_free(f);
     }
@@ -329,17 +329,33 @@ void profile_update_async(Profile *p, ProfileDoneCb cb, gpointer ud)
     fetch(f);
 }
 
-/* ---------- RU rule sets (for "bypass RU") ---------- */
+/* ---------- regional rule sets ("my country's sites go direct") ---------- */
 
-static const char *RULE_URLS[][2] = {
-    { "geoip-ru.srs",   "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs" },
-    { "geosite-ru.srs", "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs" },
+typedef struct { const char *region, *geoip, *geosite; } RuleSrc;
+static const RuleSrc RULES[] = {
+    { "ru", "geoip-ru", "geosite-category-ru" },
+    { "ir", "geoip-ir", "geosite-category-ir" },
+    { "cn", "geoip-cn", "geosite-cn" },
 };
 
 char *rules_path(const char *name)
 {
     g_autofree char *d = wl_cache_dir();
-    return g_build_filename(d, name, NULL);
+    g_autofree char *f = g_strdup_printf("%s.srs", name);
+    return g_build_filename(d, f, NULL);
+}
+
+gboolean rules_available(const char *region, gboolean *geoip, gboolean *geosite)
+{
+    *geoip = *geosite = FALSE;
+    for (guint i = 0; region && i < G_N_ELEMENTS(RULES); i++) {
+        if (strcmp(RULES[i].region, region)) continue;
+        g_autofree char *a = rules_path(RULES[i].geoip);
+        g_autofree char *b = rules_path(RULES[i].geosite);
+        *geoip = g_file_test(a, G_FILE_TEST_EXISTS);
+        *geosite = g_file_test(b, G_FILE_TEST_EXISTS);
+    }
+    return *geoip || *geosite;
 }
 
 static void on_rule(GObject *src, GAsyncResult *res, gpointer data)
@@ -361,15 +377,23 @@ static void on_rule(GObject *src, GAsyncResult *res, gpointer data)
     g_free(name);
 }
 
-void rules_update_async(gboolean force)
+static void fetch_rule(const char *repo, const char *name, gboolean force)
 {
     gint64 now = g_get_real_time() / G_USEC_PER_SEC;
-    for (guint i = 0; i < G_N_ELEMENTS(RULE_URLS); i++) {
-        g_autofree char *p = rules_path(RULE_URLS[i][0]);
-        if (!force && g_file_test(p, G_FILE_TEST_EXISTS) && now - S.rules_updated < 7 * 86400)
-            continue;
-        SoupMessage *m = soup_message_new("GET", RULE_URLS[i][1]);
-        soup_session_send_and_read_async(HTTP, m, G_PRIORITY_LOW, NULL, on_rule, g_strdup(RULE_URLS[i][0]));
-        g_object_unref(m);
+    g_autofree char *p = rules_path(name);
+    if (!force && g_file_test(p, G_FILE_TEST_EXISTS) && now - S.rules_updated < 7 * 86400) return;
+    g_autofree char *url = g_strdup_printf(
+        "https://raw.githubusercontent.com/SagerNet/%s/rule-set/%s.srs", repo, name);
+    SoupMessage *m = soup_message_new("GET", url);
+    soup_session_send_and_read_async(HTTP, m, G_PRIORITY_LOW, NULL, on_rule, g_strdup(name));
+    g_object_unref(m);
+}
+
+void rules_update_async(gboolean force)
+{
+    for (guint i = 0; i < G_N_ELEMENTS(RULES); i++) {
+        if (g_strcmp0(S.region, RULES[i].region)) continue;
+        fetch_rule("sing-geoip", RULES[i].geoip, force);
+        fetch_rule("sing-geosite", RULES[i].geosite, force);
     }
 }

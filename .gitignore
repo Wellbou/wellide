@@ -1,2 +1,6 @@
 wellide
-src/*.o
+wellide.exe
+build/
+tools/__pycache__/
+packaging/windows/dist/
+*.o

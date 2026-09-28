@@ -1,19 +1,8 @@
-// Wellide TUN: sing-box (running as the desktop user, with CAP_NET_ADMIN)
-// sets DNS on its own interface via systemd-resolved. Allow only these
-// resolved actions, only for active local sessions of wheel members.
+// Wellide TUN: let members of the wellide group set DNS on the tunnel
 polkit.addRule(function(action, subject) {
-    var ok = [
-        "org.freedesktop.resolve1.set-dns-servers",
-        "org.freedesktop.resolve1.set-domains",
-        "org.freedesktop.resolve1.set-default-route",
-        "org.freedesktop.resolve1.set-llmnr",
-        "org.freedesktop.resolve1.set-mdns",
-        "org.freedesktop.resolve1.set-dnssec",
-        "org.freedesktop.resolve1.set-dns-over-tls",
-        "org.freedesktop.resolve1.revert"
-    ];
-    if (ok.indexOf(action.id) >= 0 && subject.local && subject.active &&
-        subject.isInGroup("wheel")) {
-        return polkit.Result.YES;
+    if (action.id.indexOf("org.freedesktop.resolve1.set-") == 0 ||
+        action.id == "org.freedesktop.resolve1.revert") {
+        if (subject.local && subject.active && subject.isInGroup("wellide"))
+            return polkit.Result.YES;
     }
 });

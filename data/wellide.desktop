@@ -2,11 +2,13 @@
 Type=Application
 Name=Wellide
 GenericName=VPN client
+GenericName[ru]=VPN-клиент
 Comment=Lightweight sing-box VPN client
+Comment[ru]=Лёгкий VPN-клиент на sing-box
 Exec=wellide %u
 Icon=wellide
 Terminal=false
 Categories=Network;
 Keywords=vpn;proxy;sing-box;vless;hiddify;
-StartupWMClass=wellide
+StartupWMClass=io.github.wellbou.wellide
 MimeType=x-scheme-handler/wellide;

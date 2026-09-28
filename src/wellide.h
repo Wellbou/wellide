@@ -1,24 +1,34 @@
 #pragma once
 
 #include <gtk/gtk.h>
-#include <glib-unix.h>
-#include <glib/gstdio.h>
-#include <unistd.h>
 #include <json-glib/json-glib.h>
 #include <libsoup/soup.h>
+#include <glib/gstdio.h>
+#ifndef G_OS_WIN32
+#include <glib-unix.h>
+#include <unistd.h>
+#endif
 
-#define WL_VERSION "0.1.0"
-#define WL_APP_ID  "com.wellbou.wellide"
+#define WL_VERSION "0.2.0"
+#define WL_APP_ID  "io.github.wellbou.wellide"
+#define WL_REPO    "https://github.com/Wellbou/wellide"
+#ifndef WL_TUN_BIN
 #define WL_TUN_BIN "/usr/local/lib/wellide/sing-box"
+#endif
+
+/* ---------- i18n: two languages, picked from the locale ---------- */
+extern gboolean WL_RU;
+#define N_(ru, en) (WL_RU ? (ru) : (en))
 
 /* ---------- model ---------- */
 
 typedef struct {
     char *tag;        /* unique, used as sing-box outbound tag */
     char *name;       /* display name from the link fragment */
-    char *proto;      /* "vless · ws" etc, for the UI */
+    char *proto;      /* "vless · ws · tls" etc, for the UI */
     char *server;
     int port;
+    char *cc;         /* ISO country from the flag emoji, may be NULL */
     JsonObject *ob;   /* sing-box outbound (NULL for separators) */
     gboolean separator;
     int delay;        /* -1 unknown, -2 testing, 0 failed, >0 ms */
@@ -39,18 +49,22 @@ typedef enum { MODE_PROXY = 0, MODE_TUN = 1, MODE_LOCAL = 2 } NetMode;
 typedef enum { ST_OFF, ST_STARTING, ST_ON, ST_STOPPING } CoreState;
 
 typedef struct {
-    char *theme;      /* "purple" | "paper" */
+    char *theme;
+    char *lang;       /* "auto" | "ru" | "en" */
     int mode;
-    gboolean bypass_ru;
+    char *region;     /* "" (off) | "ru" | "ir" | "cn": that country's sites go direct */
+    gboolean auto_skip_region; /* "auto" never picks servers inside that country */
     int port;
     int api_port;
     gboolean autoconnect;
     gboolean start_hidden;
+    gboolean animations;
     char *active;     /* profile id */
     char *selected;   /* outbound tag or "auto" */
     gboolean sysproxy_set;   /* crash recovery marker */
     char *kde_prev_type;
     char *gnome_prev_mode;
+    int win_prev_enable;
     gint64 rules_updated;
 } Settings;
 
@@ -63,6 +77,9 @@ char *wl_config_dir(void);
 char *wl_cache_dir(void);
 void settings_load(void);
 void settings_save(void);
+char *fmt_bytes(gint64 b);
+char *flag_emoji(const char *cc);
+char *cc_from_flag(const char *text);
 
 /* links.c */
 GPtrArray *links_parse(const char *text);   /* -> Server* (tags not unique yet) */
@@ -81,6 +98,7 @@ void profile_update_async(Profile *p, ProfileDoneCb cb, gpointer ud);
 void profile_delete(Profile *p);
 void rules_update_async(gboolean force);
 char *rules_path(const char *name);
+gboolean rules_available(const char *region, gboolean *geoip, gboolean *geosite);
 
 /* core.c */
 CoreState core_state(void);
@@ -89,8 +107,12 @@ void core_stop(void);
 void core_restart(void);
 void core_select(const char *tag);
 void core_test_delay(const char *tag);
+void core_test_all(void);
 void core_check_ip(void);
-gboolean server_is_ru(Server *s);
+gint64 core_total_up(void);
+gint64 core_total_down(void);
+const char *core_bin(void);
+gboolean server_in_region(Server *s);
 gboolean tun_ready(void);
 void tun_setup_async(void);
 
@@ -98,8 +120,40 @@ void tun_setup_async(void);
 void sysproxy_enable(int port);
 void sysproxy_disable(void);
 
-/* theme.c */
-char *theme_css(const char *theme);
+/* theme.c — see the header comment there for the custom theme format */
+typedef enum {
+    TC_BG, TC_BG2, TC_CARD, TC_FG, TC_FG_DIM, TC_ACCENT, TC_ACCENT_FG,
+    TC_LINE, TC_DANGER, TC_INK, TC_GLOW, TC_RULE, TC_MARGIN, TC_N
+} ThemeColor;
+
+typedef struct {
+    char *id, *name;
+    char *c[TC_N];
+    gboolean ruled, outline, pixel, builtin;
+    int radius;
+    char *css_extra;
+} Theme;
+
+void themes_reload(void);
+void themes_watch(void (*cb)(void));
+GPtrArray *themes_list(void);
+const Theme *theme_current(void);
+char *theme_css(const Theme *t);
+char *themes_dir(void);
+
+/* vortex.c — the animated pixel vortex (connect button, tray-less logo) */
+GtkWidget *vortex_new(int cells);
+void vortex_set_state(GtkWidget *w, CoreState st);
+void vortex_set_label(GtkWidget *w, const char *text);
+void vortex_set_colors(GtkWidget *w, const char *ink, const char *glow, const char *bg);
+void vortex_set_animated(GtkWidget *w, gboolean on);
+GdkPixbuf *vortex_icon_pixbuf(int cells, int px, const char *ink, const char *glow);
+
+/* graph.c — smooth traffic sparkline */
+GtkWidget *graph_new(void);
+void graph_push(GtkWidget *w, gint64 up, gint64 down);
+void graph_clear(GtkWidget *w);
+void graph_set_colors(GtkWidget *w, const char *up, const char *down, const char *grid);
 
 /* callbacks into the UI (main.c) */
 void ui_on_state(CoreState st, const char *error);
@@ -109,7 +163,3 @@ void ui_on_delay(const char *tag, int ms, gboolean tcp);
 void ui_on_ip(const char *ip, const char *cc);
 void ui_on_tun_setup(gboolean ok, const char *msg);
 void ui_toast(const char *msg);
-
-/* helpers */
-char *fmt_bytes(gint64 b);
-char *flag_emoji(const char *cc);

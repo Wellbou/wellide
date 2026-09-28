@@ -7,7 +7,7 @@
 void server_free(Server *s)
 {
     if (!s) return;
-    g_free(s->tag); g_free(s->name); g_free(s->proto); g_free(s->server);
+    g_free(s->tag); g_free(s->name); g_free(s->proto); g_free(s->server); g_free(s->cc);
     if (s->ob) json_object_unref(s->ob);
     g_free(s);
 }
@@ -245,6 +245,7 @@ static Server *new_server(const char *name, const char *scheme, const char *tr,
     s->proto = tr ? g_strdup_printf("%s · %s", scheme, tr) : g_strdup(scheme);
     s->server = g_strdup(host);
     s->port = port;
+    s->cc = cc_from_flag(s->name);
     s->ob = ob;
     s->delay = -1;
     /* providers put "0.0.0.0" entries as section headers */

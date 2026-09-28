@@ -1,21 +1,26 @@
 /* Wellide — lightweight sing-box GUI (GTK3). */
 #include "wellide.h"
-#include <libayatana-appindicator/app-indicator.h>
 #include <string.h>
-
-gint64 core_total_up(void);
-gint64 core_total_down(void);
+#ifdef HAVE_APPINDICATOR
+#include <libayatana-appindicator/app-indicator.h>
+#endif
 
 static GtkApplication *app;
 static GtkWidget *win, *stack, *toast_rev, *toast_lbl;
 static GtkCssProvider *css;
 static GHashTable *nav_btns;       /* page -> button */
+static gboolean have_tray;
+#ifdef HAVE_APPINDICATOR
 static AppIndicator *tray;
 static GtkWidget *tray_toggle;
+#else
+static GtkStatusIcon *tray;
+#endif
 
 /* home */
-static GtkWidget *h_btn, *h_btn_lbl, *h_status, *h_err, *h_server, *h_ip, *h_speed,
-                 *h_total, *h_prof_name, *h_prof_usage, *h_prof_bar, *h_prof_exp, *h_mode;
+static GtkWidget *h_vortex, *h_status, *h_err, *h_server, *h_ip, *h_speed, *h_total, *h_graph,
+                 *h_prof_name, *h_prof_usage, *h_prof_bar, *h_prof_exp, *h_mode;
+static GtkWidget *brand_vortex;
 /* proxies */
 static GtkWidget *p_list, *p_title;
 /* profiles */
@@ -24,14 +29,16 @@ static GtkWidget *pr_list, *pr_entry, *pr_add;
 static GtkTextBuffer *log_buf;
 static int log_lines;
 /* settings */
-static GtkWidget *st_tun_btn, *st_tun_lbl;
+static GtkWidget *st_tun_btn, *st_tun_lbl, *st_theme;
 
 static gboolean quitting;
-static gboolean on_signal(gpointer ud);
+static guint ping_timer;
 
 static void rebuild_proxies(void);
 static void rebuild_profiles(void);
 static void refresh_home(void);
+static void schedule_ping(guint delay_s);
+static G_GNUC_UNUSED gboolean on_signal(gpointer ud);
 
 /* ---------- small helpers ---------- */
 
@@ -81,6 +88,7 @@ static gboolean hide_toast(gpointer ud)
 
 void ui_toast(const char *msg)
 {
+    if (!toast_rev) return;
     gtk_label_set_text(GTK_LABEL(toast_lbl), msg);
     gtk_revealer_set_reveal_child(GTK_REVEALER(toast_rev), TRUE);
     if (toast_timer) g_source_remove(toast_timer);
@@ -89,13 +97,24 @@ void ui_toast(const char *msg)
 
 static void apply_theme(void)
 {
-    g_autofree char *c = theme_css(S.theme);
+    const Theme *t = theme_current();
+    g_autofree char *c = theme_css(t);
     gtk_css_provider_load_from_data(css, c, -1, NULL);
+    if (h_vortex) vortex_set_colors(h_vortex, t->c[TC_INK], t->c[TC_GLOW], t->c[TC_BG]);
+    if (brand_vortex) vortex_set_colors(brand_vortex, t->c[TC_INK], t->c[TC_GLOW], t->c[TC_BG2]);
+    if (h_graph) graph_set_colors(h_graph, t->c[TC_GLOW], t->c[TC_ACCENT], t->c[TC_LINE]);
 }
 
 static const char *mode_name(int m)
 {
-    return m == MODE_TUN ? "TUN — весь трафик" : m == MODE_PROXY ? "Системный прокси" : "Только локальный порт";
+    return m == MODE_TUN   ? N_("TUN — весь трафик", "TUN — all traffic")
+         : m == MODE_PROXY ? N_("Системный прокси", "System proxy")
+                           : N_("Только локальный порт", "Local port only");
+}
+
+static const char *on_label(CoreState st)
+{
+    return st == ST_ON ? N_("ВЫКЛ", "OFF") : st == ST_OFF ? N_("ВКЛ", "ON") : "...";
 }
 
 /* ---------- navigation ---------- */
@@ -118,23 +137,29 @@ static void tray_update(void)
 {
     if (!tray) return;
     CoreState st = core_state();
+#ifdef HAVE_APPINDICATOR
     gtk_menu_item_set_label(GTK_MENU_ITEM(tray_toggle),
-        st == ST_ON ? "Отключиться" : st == ST_OFF ? "Подключиться" : "…");
-    app_indicator_set_icon_full(tray, st == ST_ON ? "network-vpn" : "network-vpn-disconnected",
-                                st == ST_ON ? "Подключено" : "Отключено");
+        st == ST_ON ? N_("Отключиться", "Disconnect") : st == ST_OFF ? N_("Подключиться", "Connect") : "…");
+    app_indicator_set_icon_full(tray, st == ST_ON ? "wellide-on" : "wellide",
+                                st == ST_ON ? N_("Подключено", "Connected") : N_("Отключено", "Disconnected"));
+#else
+    gtk_status_icon_set_tooltip_text(tray, st == ST_ON ? "Wellide — ON" : "Wellide — OFF");
+#endif
 }
 
 void ui_on_state(CoreState st, const char *error)
 {
     if (quitting && st == ST_OFF) { g_application_quit(G_APPLICATION(app)); return; }
-    const char *txt = st == ST_ON ? "Подключено" : st == ST_STARTING ? "Подключение…"
-                    : st == ST_STOPPING ? "Отключение…" : "Отключено";
+    const char *txt = st == ST_ON       ? N_("Подключено", "Connected")
+                    : st == ST_STARTING ? N_("Подключение…", "Connecting…")
+                    : st == ST_STOPPING ? N_("Отключение…", "Disconnecting…")
+                                        : N_("Отключено", "Disconnected");
     gtk_label_set_text(GTK_LABEL(h_status), txt);
     set_class(h_status, "status-on", st == ST_ON);
     set_class(h_status, "status-off", st != ST_ON);
-    gtk_label_set_text(GTK_LABEL(h_btn_lbl), st == ST_ON ? "ВЫКЛ" : st == ST_OFF ? "ВКЛ" : "…");
-    set_class(h_btn, "on", st == ST_ON);
-    set_class(h_btn, "busy", st == ST_STARTING || st == ST_STOPPING);
+    vortex_set_label(h_vortex, on_label(st));
+    vortex_set_state(h_vortex, st);
+    vortex_set_state(brand_vortex, st);
     if (error) {
         gtk_label_set_text(GTK_LABEL(h_err), error);
         gtk_widget_show(h_err);
@@ -142,7 +167,10 @@ void ui_on_state(CoreState st, const char *error)
         gtk_widget_hide(h_err);
     }
     if (st != ST_ON) gtk_label_set_text(GTK_LABEL(h_ip), "");
-    rebuild_proxies();   /* delay semantics differ on/off */
+    if (st == ST_OFF) graph_clear(h_graph);
+    /* delays mean different things on/off — re-measure after settling */
+    if (st == ST_ON) schedule_ping(4);
+    else if (st == ST_OFF) schedule_ping(1);
     tray_update();
 }
 
@@ -153,11 +181,12 @@ void ui_on_traffic(gint64 up, gint64 down)
         gtk_label_set_text(GTK_LABEL(h_total), "");
         return;
     }
+    graph_push(h_graph, up, down);
     g_autofree char *u = fmt_bytes(up), *d = fmt_bytes(down);
-    g_autofree char *s = g_strdup_printf("↑ %s/с    ↓ %s/с", u, d);
+    g_autofree char *s = g_strdup_printf("↑ %s/%s    ↓ %s/%s", u, N_("с", "s"), d, N_("с", "s"));
     gtk_label_set_text(GTK_LABEL(h_speed), s);
     g_autofree char *tu = fmt_bytes(core_total_up()), *td = fmt_bytes(core_total_down());
-    g_autofree char *t = g_strdup_printf("за сессию: ↑ %s   ↓ %s", tu, td);
+    g_autofree char *t = g_strdup_printf("%s ↑ %s   ↓ %s", N_("за сессию:", "this session:"), tu, td);
     gtk_label_set_text(GTK_LABEL(h_total), t);
 }
 
@@ -168,7 +197,7 @@ void ui_on_log(const char *line)
     gtk_text_buffer_insert(log_buf, &end, line, -1);
     gtk_text_buffer_get_end_iter(log_buf, &end);
     gtk_text_buffer_insert(log_buf, &end, "\n", 1);
-    /* keep the log bounded: memory budget matters more than history */
+    /* bounded: the memory budget matters more than history */
     if (++log_lines > 400) {
         GtkTextIter a, b;
         gtk_text_buffer_get_start_iter(log_buf, &a);
@@ -185,13 +214,13 @@ static void set_delay_label(GtkWidget *l, int ms)
     gtk_style_context_remove_class(sc, "ping-mid");
     gtk_style_context_remove_class(sc, "ping-bad");
     if (ms == -1) { gtk_label_set_text(GTK_LABEL(l), ""); return; }
-    if (ms == -2) { gtk_label_set_text(GTK_LABEL(l), "…"); return; }
+    if (ms == -2) { gtk_label_set_text(GTK_LABEL(l), "···"); return; }
     if (ms == 0) {
         gtk_label_set_text(GTK_LABEL(l), "✕");
         gtk_style_context_add_class(sc, "ping-bad");
         return;
     }
-    g_autofree char *t = g_strdup_printf("%d мс", ms);
+    g_autofree char *t = g_strdup_printf("%d %s", ms, N_("мс", "ms"));
     gtk_label_set_text(GTK_LABEL(l), t);
     gtk_style_context_add_class(sc, ms < 300 ? "ping-good" : ms < 800 ? "ping-mid" : "ping-bad");
 }
@@ -207,18 +236,37 @@ void ui_on_delay(const char *tag, int ms, gboolean tcp)
 
 void ui_on_ip(const char *ip, const char *cc)
 {
-    if (!ip) { gtk_label_set_text(GTK_LABEL(h_ip), "IP: не удалось проверить"); return; }
+    if (!ip) { gtk_label_set_text(GTK_LABEL(h_ip), N_("IP: не удалось проверить", "IP: check failed")); return; }
     g_autofree char *flag = cc && *cc ? flag_emoji(cc) : g_strdup("");
-    g_autofree char *t = g_strdup_printf("IP: %s %s", ip, flag);
+    g_autofree char *t = g_strdup_printf("IP %s %s", ip, flag);
     gtk_label_set_text(GTK_LABEL(h_ip), t);
 }
 
 void ui_on_tun_setup(gboolean ok, const char *msg)
 {
     ui_toast(msg);
+    if (!st_tun_btn) return;
     gtk_widget_set_sensitive(st_tun_btn, TRUE);
-    gtk_label_set_text(GTK_LABEL(st_tun_lbl), tun_ready() ? "Права выданы ✓" : "Права не выданы");
+    gtk_label_set_text(GTK_LABEL(st_tun_lbl), tun_ready() ? N_("Права выданы ✓", "Granted ✓")
+                                                          : N_("Права не выданы", "Not granted"));
     if (ok && S.mode == MODE_TUN && core_state() == ST_OFF) gtk_widget_hide(h_err);
+}
+
+/* ---------- automatic ping ---------- */
+
+static gboolean ping_now(gpointer ud)
+{
+    ping_timer = 0;
+    CoreState st = core_state();
+    if (st == ST_ON || st == ST_OFF) core_test_all();
+    schedule_ping(st == ST_ON ? 120 : 300);   /* keep numbers fresh */
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_ping(guint delay_s)
+{
+    if (ping_timer) g_source_remove(ping_timer);
+    ping_timer = g_timeout_add_seconds(delay_s, ping_now, NULL);
 }
 
 /* ---------- home page ---------- */
@@ -232,18 +280,25 @@ static void on_connect(GtkButton *b, gpointer ud)
     }
 }
 
+static gboolean on_vortex_click(GtkWidget *w, GdkEventButton *e, gpointer ud)
+{
+    if (e->button == 1 && e->type == GDK_BUTTON_RELEASE) on_connect(NULL, NULL);
+    return TRUE;
+}
+
 static void refresh_home(void)
 {
     Profile *p = profile_active();
     const char *sel = S.selected && *S.selected ? S.selected : "auto";
     Server *s = profile_find_server(p, sel);
-    g_autofree char *srv = s ? g_strdup(s->name) : g_strdup("⚡ Авто (лучший пинг)");
+    g_autofree char *srv = s ? g_strdup(s->name) : g_strdup(N_("⚡ Авто — лучший пинг", "⚡ Auto — lowest ping"));
     gtk_label_set_text(GTK_LABEL(h_server), srv);
     gtk_label_set_text(GTK_LABEL(h_mode), mode_name(S.mode));
 
     if (!p) {
-        gtk_label_set_text(GTK_LABEL(h_prof_name), "Нет профиля");
-        gtk_label_set_text(GTK_LABEL(h_prof_usage), "Добавьте подписку на вкладке «Профили»");
+        gtk_label_set_text(GTK_LABEL(h_prof_name), N_("Нет профиля", "No profile"));
+        gtk_label_set_text(GTK_LABEL(h_prof_usage), N_("Добавьте подписку на вкладке «Профили»",
+                                                       "Add a subscription on the Profiles tab"));
         gtk_widget_hide(h_prof_bar);
         gtk_label_set_text(GTK_LABEL(h_prof_exp), "");
         return;
@@ -252,14 +307,14 @@ static void refresh_home(void)
     gint64 used = p->upload + p->download;
     if (p->total > 0) {
         g_autofree char *u = fmt_bytes(used), *t = fmt_bytes(p->total);
-        g_autofree char *s2 = g_strdup_printf("%s из %s", u, t);
+        g_autofree char *s2 = g_strdup_printf("%s %s %s", u, N_("из", "of"), t);
         gtk_label_set_text(GTK_LABEL(h_prof_usage), s2);
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(h_prof_bar), CLAMP((double)used / p->total, 0, 1));
         gtk_widget_show(h_prof_bar);
     } else {
         g_autofree char *u = fmt_bytes(used);
-        g_autofree char *s2 = used ? g_strdup_printf("использовано %s · безлимит", u)
-                                   : g_strdup_printf("%d серверов", profile_server_count(p));
+        g_autofree char *s2 = used ? g_strdup_printf("%s %s · %s", N_("использовано", "used"), u, N_("безлимит", "unlimited"))
+                                   : g_strdup_printf("%d %s", profile_server_count(p), N_("серверов", "servers"));
         gtk_label_set_text(GTK_LABEL(h_prof_usage), s2);
         gtk_widget_hide(h_prof_bar);
     }
@@ -268,37 +323,40 @@ static void refresh_home(void)
         g_autoptr(GDateTime) dt = g_date_time_new_from_unix_local(p->expire);
         gint64 days = (p->expire - g_get_real_time() / G_USEC_PER_SEC) / 86400;
         g_autofree char *d = g_date_time_format(dt, "%d.%m.%Y");
-        exp = g_strdup_printf("до %s (%" G_GINT64_FORMAT " дн.)", d, MAX(days, 0));
-    } else exp = g_strdup("бессрочно");
+        exp = g_strdup_printf("%s %s (%" G_GINT64_FORMAT " %s)", N_("до", "until"), d, MAX(days, 0), N_("дн.", "d"));
+    } else exp = g_strdup(N_("бессрочно", "no expiry"));
     gtk_label_set_text(GTK_LABEL(h_prof_exp), exp);
 }
 
 static GtkWidget *page_home(void)
 {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
-    gtk_container_set_border_width(GTK_CONTAINER(box), 24);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 22);
 
-    GtkWidget *center = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    GtkWidget *center = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_halign(center, GTK_ALIGN_CENTER);
-    gtk_widget_set_margin_top(center, 10);
 
-    h_btn = gtk_button_new();
-    h_btn_lbl = gtk_label_new("ВКЛ");
-    gtk_container_add(GTK_CONTAINER(h_btn), h_btn_lbl);
-    add_class(h_btn, "connect");
-    gtk_widget_set_halign(h_btn, GTK_ALIGN_CENTER);
-    g_signal_connect(h_btn, "clicked", G_CALLBACK(on_connect), NULL);
-    gtk_box_pack_start(GTK_BOX(center), h_btn, FALSE, FALSE, 0);
+    /* the vortex *is* the connect button */
+    GtkWidget *ev = gtk_event_box_new();
+    h_vortex = vortex_new(21);
+    gtk_widget_set_size_request(h_vortex, 210, 210);
+    vortex_set_label(h_vortex, on_label(ST_OFF));
+    vortex_set_animated(h_vortex, S.animations);
+    gtk_container_add(GTK_CONTAINER(ev), h_vortex);
+    gtk_widget_add_events(ev, GDK_BUTTON_RELEASE_MASK);
+    g_signal_connect(ev, "button-release-event", G_CALLBACK(on_vortex_click), NULL);
+    gtk_widget_set_tooltip_text(ev, N_("Подключить / отключить", "Connect / disconnect"));
+    gtk_box_pack_start(GTK_BOX(center), ev, FALSE, FALSE, 0);
 
-    h_status = gtk_label_new("Отключено");
+    h_status = gtk_label_new(N_("Отключено", "Disconnected"));
     add_class(h_status, "big");
     add_class(h_status, "status-off");
-    gtk_box_pack_start(GTK_BOX(center), h_status, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(center), h_status, FALSE, FALSE, 2);
 
     h_err = gtk_label_new("");
     add_class(h_err, "error");
     gtk_label_set_line_wrap(GTK_LABEL(h_err), TRUE);
-    gtk_label_set_max_width_chars(GTK_LABEL(h_err), 60);
+    gtk_label_set_max_width_chars(GTK_LABEL(h_err), 64);
     gtk_label_set_justify(GTK_LABEL(h_err), GTK_JUSTIFY_CENTER);
     gtk_label_set_selectable(GTK_LABEL(h_err), TRUE);
     gtk_widget_set_no_show_all(h_err, TRUE);
@@ -307,33 +365,38 @@ static GtkWidget *page_home(void)
     h_ip = gtk_label_new("");
     add_class(h_ip, "dim");
     gtk_box_pack_start(GTK_BOX(center), h_ip, FALSE, FALSE, 0);
-    h_speed = gtk_label_new("");
-    add_class(h_speed, "h2");
-    gtk_box_pack_start(GTK_BOX(center), h_speed, FALSE, FALSE, 0);
-    h_total = gtk_label_new("");
-    add_class(h_total, "dim");
-    gtk_box_pack_start(GTK_BOX(center), h_total, FALSE, FALSE, 0);
-
     gtk_box_pack_start(GTK_BOX(box), center, FALSE, FALSE, 0);
+
+    /* live traffic */
+    GtkWidget *tc = card();
+    GtkWidget *trow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    h_speed = label("", "h2");
+    gtk_box_pack_start(GTK_BOX(trow), h_speed, TRUE, TRUE, 0);
+    h_total = label("", "dim");
+    gtk_box_pack_end(GTK_BOX(trow), h_total, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tc), trow, FALSE, FALSE, 0);
+    h_graph = graph_new();
+    gtk_box_pack_start(GTK_BOX(tc), h_graph, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), tc, FALSE, FALSE, 0);
 
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_box_set_homogeneous(GTK_BOX(row), TRUE);
 
     GtkWidget *c1 = card();
-    gtk_box_pack_start(GTK_BOX(c1), label("Сервер", "dim"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c1), label(N_("Сервер", "Server"), "dim"), FALSE, FALSE, 0);
     h_server = label("", "h2");
     gtk_label_set_ellipsize(GTK_LABEL(h_server), PANGO_ELLIPSIZE_END);
     gtk_box_pack_start(GTK_BOX(c1), h_server, FALSE, FALSE, 0);
     h_mode = label("", "dim");
     gtk_box_pack_start(GTK_BOX(c1), h_mode, FALSE, FALSE, 0);
-    GtkWidget *chg = btn("Выбрать сервер", "flat-btn", G_CALLBACK(on_nav), "proxies");
+    GtkWidget *chg = btn(N_("Выбрать сервер", "Choose server"), "flat-btn", G_CALLBACK(on_nav), "proxies");
     gtk_widget_set_halign(chg, GTK_ALIGN_START);
     gtk_widget_set_margin_top(chg, 4);
     gtk_box_pack_start(GTK_BOX(c1), chg, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(row), c1, TRUE, TRUE, 0);
 
     GtkWidget *c2 = card();
-    gtk_box_pack_start(GTK_BOX(c2), label("Профиль", "dim"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c2), label(N_("Профиль", "Profile"), "dim"), FALSE, FALSE, 0);
     h_prof_name = label("", "h2");
     gtk_label_set_ellipsize(GTK_LABEL(h_prof_name), PANGO_ELLIPSIZE_END);
     gtk_box_pack_start(GTK_BOX(c2), h_prof_name, FALSE, FALSE, 0);
@@ -364,28 +427,16 @@ static void on_row_activated(GtkListBox *lb, GtkListBoxRow *row, gpointer ud)
     }
     g_list_free(rows);
     refresh_home();
-    ui_toast(core_state() == ST_ON ? "Сервер переключён" : "Сервер выбран");
+    ui_toast(core_state() == ST_ON ? N_("Сервер переключён", "Server switched") : N_("Сервер выбран", "Server selected"));
 }
 
-static void on_ping_all(GtkButton *b, gpointer ud)
-{
-    Profile *p = profile_active();
-    if (!p) return;
-    for (guint i = 0; i < p->servers->len; i++) {
-        Server *s = p->servers->pdata[i];
-        if (s->separator) continue;
-        s->delay = -2;
-        if (s->delay_label) set_delay_label(s->delay_label, -2);
-        core_test_delay(s->tag);
-    }
-}
+static void on_ping_all(GtkButton *b, gpointer ud) { schedule_ping(0); }
 
 static void on_ping_one(GtkButton *b, gpointer ud)
 {
     Server *s = profile_find_server(profile_active(), ud);
     if (!s) return;
-    s->delay = -2;
-    if (s->delay_label) set_delay_label(s->delay_label, -2);
+    ui_on_delay(s->tag, -2, FALSE);
     core_test_delay(s->tag);
 }
 
@@ -393,9 +444,8 @@ static void on_sort_ping(GtkButton *b, gpointer ud)
 {
     Profile *p = profile_active();
     if (!p) return;
-    /* sort non-separator servers by delay; unknown/failed go last */
     GPtrArray *a = p->servers;
-    for (guint i = 1; i < a->len; i++) {
+    for (guint i = 1; i < a->len; i++)
         for (guint j = i; j > 0; j--) {
             Server *x = a->pdata[j - 1], *y = a->pdata[j];
             int dx = x->separator ? -3 : (x->delay > 0 ? x->delay : 1 << 30);
@@ -403,7 +453,6 @@ static void on_sort_ping(GtkButton *b, gpointer ud)
             if (dx <= dy) break;
             a->pdata[j - 1] = y; a->pdata[j] = x;
         }
-    }
     rebuild_proxies();
 }
 
@@ -417,7 +466,11 @@ static GtkWidget *server_row(const char *tag, const char *name, const char *sub,
     GtkWidget *n = label(name, "h2");
     gtk_label_set_ellipsize(GTK_LABEL(n), PANGO_ELLIPSIZE_END);
     gtk_box_pack_start(GTK_BOX(v), n, FALSE, FALSE, 0);
-    if (sub) gtk_box_pack_start(GTK_BOX(v), label(sub, "dim"), FALSE, FALSE, 0);
+    if (sub) {
+        GtkWidget *sl = label(sub, "dim");
+        gtk_label_set_ellipsize(GTK_LABEL(sl), PANGO_ELLIPSIZE_END);
+        gtk_box_pack_start(GTK_BOX(v), sl, FALSE, FALSE, 0);
+    }
     gtk_box_pack_start(GTK_BOX(h), v, TRUE, TRUE, 0);
     if (s) {
         GtkWidget *d = gtk_label_new("");
@@ -428,7 +481,8 @@ static GtkWidget *server_row(const char *tag, const char *name, const char *sub,
         g_signal_connect_swapped(d, "destroy", G_CALLBACK(g_nullify_pointer), &s->delay_label);
         gtk_box_pack_start(GTK_BOX(h), d, FALSE, FALSE, 0);
         GtkWidget *pb = btn("⟳", "flat-btn", G_CALLBACK(on_ping_one), s->tag);
-        gtk_widget_set_tooltip_text(pb, "Проверить пинг");
+        add_class(pb, "icon-btn");
+        gtk_widget_set_tooltip_text(pb, N_("Проверить пинг", "Test ping"));
         gtk_box_pack_start(GTK_BOX(h), pb, FALSE, FALSE, 0);
     }
     gtk_container_add(GTK_CONTAINER(row), h);
@@ -445,12 +499,17 @@ static void rebuild_proxies(void)
     g_list_free(rows);
 
     Profile *p = profile_active();
-    g_autofree char *title = p ? g_strdup_printf("Серверы · %d", profile_server_count(p)) : g_strdup("Серверы");
+    g_autofree char *title = p ? g_strdup_printf("%s · %d", N_("Серверы", "Servers"), profile_server_count(p))
+                               : g_strdup(N_("Серверы", "Servers"));
     gtk_label_set_text(GTK_LABEL(p_title), title);
     if (!p) return;
 
-    gtk_container_add(GTK_CONTAINER(p_list),
-        server_row("auto", "⚡ Авто", "лучший пинг среди зарубежных серверов, перепроверка каждые 2 мин (🇷🇺 не выбирается)", NULL));
+    g_autofree char *auto_sub = S.region && *S.region && S.auto_skip_region
+        ? g_strdup_printf(N_("лучший пинг, проверка каждые 2 мин · без серверов %s",
+                             "lowest ping, rechecked every 2 min · skips %s servers"),
+                          flag_emoji(S.region))
+        : g_strdup(N_("лучший пинг, проверка каждые 2 мин", "lowest ping, rechecked every 2 min"));
+    gtk_container_add(GTK_CONTAINER(p_list), server_row("auto", N_("⚡ Авто", "⚡ Auto"), auto_sub, NULL));
     for (guint i = 0; i < p->servers->len; i++) {
         Server *s = p->servers->pdata[i];
         if (s->separator) {
@@ -473,14 +532,15 @@ static GtkWidget *page_proxies(void)
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_container_set_border_width(GTK_CONTAINER(box), 20);
     GtkWidget *hdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    p_title = label("Серверы", "h1");
+    p_title = label(N_("Серверы", "Servers"), "h1");
     gtk_box_pack_start(GTK_BOX(hdr), p_title, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(hdr), btn("Сортировать по пингу", "flat-btn", G_CALLBACK(on_sort_ping), NULL), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hdr), btn("Проверить все", "accent-btn", G_CALLBACK(on_ping_all), NULL), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hdr), btn(N_("По пингу", "Sort by ping"), "flat-btn", G_CALLBACK(on_sort_ping), NULL), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hdr), btn(N_("Обновить пинг", "Refresh ping"), "accent-btn", G_CALLBACK(on_ping_all), NULL), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), hdr, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(box),
-        label("Без подключения пинг — это время TCP-соединения, с подключением — реальная задержка через сервер.", "dim"),
-        FALSE, FALSE, 0);
+    GtkWidget *hint = label(N_("Пинг обновляется сам. Без подключения — время TCP-соединения, с подключением — реальная задержка через сервер.",
+                               "Ping refreshes automatically. Offline it is TCP connect time; connected it is the real delay through the server."), "dim");
+    gtk_label_set_line_wrap(GTK_LABEL(hint), TRUE);
+    gtk_box_pack_start(GTK_BOX(box), hint, FALSE, FALSE, 0);
 
     GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
@@ -497,20 +557,21 @@ static GtkWidget *page_proxies(void)
 
 static void on_profile_done(const char *id, const char *error, gpointer ud)
 {
-    gtk_widget_set_sensitive(pr_add, TRUE);
+    if (pr_add) gtk_widget_set_sensitive(pr_add, TRUE);
     if (error) {
-        g_autofree char *m = g_strdup_printf("Ошибка: %s", error);
+        g_autofree char *m = g_strdup_printf("%s: %s", N_("Ошибка", "Error"), error);
         ui_toast(m);
         return;
     }
-    if (ud) gtk_entry_set_text(GTK_ENTRY(pr_entry), "");
+    if (ud && pr_entry) gtk_entry_set_text(GTK_ENTRY(pr_entry), "");
     Profile *p = profile_by_id(id);
-    g_autofree char *m = p ? g_strdup_printf("«%s»: %d серверов", p->name, profile_server_count(p))
-                           : g_strdup("Готово");
+    g_autofree char *m = p ? g_strdup_printf("«%s»: %d %s", p->name, profile_server_count(p), N_("серверов", "servers"))
+                           : g_strdup(N_("Готово", "Done"));
     ui_toast(m);
     rebuild_profiles();
     rebuild_proxies();
     refresh_home();
+    if (p && p == profile_active()) schedule_ping(1);
 }
 
 static void on_add_profile(GtkWidget *w, gpointer ud)
@@ -520,12 +581,12 @@ static void on_add_profile(GtkWidget *w, gpointer ud)
         /* empty field: take the clipboard, like Hiddify's "add from clipboard" */
         GtkClipboard *cb = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
         g_autofree char *clip = gtk_clipboard_wait_for_text(cb);
-        if (!clip || !*g_strstrip(clip)) { ui_toast("Вставьте ссылку на подписку или ключ"); return; }
+        if (!clip || !*g_strstrip(clip)) { ui_toast(N_("Вставьте ссылку на подписку или ключ", "Paste a subscription link or key")); return; }
         gtk_entry_set_text(GTK_ENTRY(pr_entry), clip);
         t = gtk_entry_get_text(GTK_ENTRY(pr_entry));
     }
     gtk_widget_set_sensitive(pr_add, FALSE);
-    ui_toast("Загружаю подписку…");
+    ui_toast(N_("Загружаю подписку…", "Fetching subscription…"));
     profile_add_async(t, on_profile_done, GINT_TO_POINTER(1));
 }
 
@@ -540,13 +601,14 @@ static void on_use_profile(GtkButton *b, gpointer id)
     rebuild_proxies();
     refresh_home();
     core_restart();
+    schedule_ping(1);
 }
 
 static void on_update_profile(GtkButton *b, gpointer id)
 {
     Profile *p = profile_by_id(id);
     if (!p) return;
-    ui_toast("Обновляю…");
+    ui_toast(N_("Обновляю…", "Updating…"));
     profile_update_async(p, on_profile_done, NULL);
 }
 
@@ -555,7 +617,7 @@ static void on_delete_profile(GtkButton *b, gpointer id)
     Profile *p = profile_by_id(id);
     if (!p) return;
     GtkWidget *d = gtk_message_dialog_new(GTK_WINDOW(win), GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION,
-        GTK_BUTTONS_OK_CANCEL, "Удалить профиль «%s»?", p->name);
+        GTK_BUTTONS_OK_CANCEL, N_("Удалить профиль «%s»?", "Delete profile “%s”?"), p->name);
     int r = gtk_dialog_run(GTK_DIALOG(d));
     gtk_widget_destroy(d);
     if (r != GTK_RESPONSE_OK) return;
@@ -574,26 +636,25 @@ static void rebuild_profiles(void)
     g_list_free(rows);
 
     Profile *act = profile_active();
-    if (!PROFILES->len) {
-        gtk_box_pack_start(GTK_BOX(pr_list), label("Профилей пока нет.", "dim"), FALSE, FALSE, 0);
-    }
+    if (!PROFILES->len)
+        gtk_box_pack_start(GTK_BOX(pr_list), label(N_("Профилей пока нет.", "No profiles yet."), "dim"), FALSE, FALSE, 0);
     for (guint i = 0; i < PROFILES->len; i++) {
         Profile *p = PROFILES->pdata[i];
         GtkWidget *c = card();
         GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-        g_autofree char *nm = g_strdup_printf("%s%s", p == act ? "● " : "", p->name);
+        g_autofree char *nm = g_strdup_printf("%s%s", p == act ? "▶ " : "", p->name);
         GtkWidget *n = label(nm, "h2");
         gtk_label_set_ellipsize(GTK_LABEL(n), PANGO_ELLIPSIZE_END);
         gtk_box_pack_start(GTK_BOX(top), n, TRUE, TRUE, 0);
         if (p != act)
-            gtk_box_pack_start(GTK_BOX(top), btn("Использовать", "accent-btn", G_CALLBACK(on_use_profile), p->id), FALSE, FALSE, 0);
+            gtk_box_pack_start(GTK_BOX(top), btn(N_("Использовать", "Use"), "accent-btn", G_CALLBACK(on_use_profile), p->id), FALSE, FALSE, 0);
         if (p->url)
-            gtk_box_pack_start(GTK_BOX(top), btn("Обновить", "flat-btn", G_CALLBACK(on_update_profile), p->id), FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(top), btn("Удалить", "flat-btn", G_CALLBACK(on_delete_profile), p->id), FALSE, FALSE, 0);
+            gtk_box_pack_start(GTK_BOX(top), btn(N_("Обновить", "Update"), "flat-btn", G_CALLBACK(on_update_profile), p->id), FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(top), btn(N_("Удалить", "Delete"), "flat-btn", G_CALLBACK(on_delete_profile), p->id), FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(c), top, FALSE, FALSE, 0);
 
         GString *info = g_string_new(NULL);
-        g_string_append_printf(info, "%d серверов", profile_server_count(p));
+        g_string_append_printf(info, "%d %s", profile_server_count(p), N_("серверов", "servers"));
         if (p->total > 0) {
             g_autofree char *u = fmt_bytes(p->upload + p->download), *t = fmt_bytes(p->total);
             g_string_append_printf(info, " · %s / %s", u, t);
@@ -601,7 +662,7 @@ static void rebuild_profiles(void)
         if (p->updated) {
             g_autoptr(GDateTime) dt = g_date_time_new_from_unix_local(p->updated);
             g_autofree char *d = g_date_time_format(dt, "%d.%m %H:%M");
-            g_string_append_printf(info, " · обновлено %s", d);
+            g_string_append_printf(info, " · %s %s", N_("обновлено", "updated"), d);
         }
         gtk_box_pack_start(GTK_BOX(c), label(info->str, "dim"), FALSE, FALSE, 0);
         g_string_free(info, TRUE);
@@ -620,23 +681,27 @@ static GtkWidget *page_profiles(void)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_container_set_border_width(GTK_CONTAINER(box), 20);
-    gtk_box_pack_start(GTK_BOX(box), label("Профили", "h1"), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(box),
-        label("Ссылка на подписку (https://…) или ключи vless:// vmess:// trojan:// ss:// hy2:// tuic://. "
-              "Пустое поле — вставить из буфера обмена.", "dim"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), label(N_("Профили", "Profiles"), "h1"), FALSE, FALSE, 0);
+    GtkWidget *hint = label(N_("Ссылка на подписку (https://…) или ключи vless:// vmess:// trojan:// ss:// hy2:// tuic://. "
+                               "Пустое поле — вставить из буфера обмена.",
+                               "A subscription link (https://…) or vless:// vmess:// trojan:// ss:// hy2:// tuic:// keys. "
+                               "Leave empty to paste from the clipboard."), "dim");
+    gtk_label_set_line_wrap(GTK_LABEL(hint), TRUE);
+    gtk_box_pack_start(GTK_BOX(box), hint, FALSE, FALSE, 0);
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     pr_entry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(pr_entry), "https://… или vless://…");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(pr_entry), N_("https://… или vless://…", "https://… or vless://…"));
     g_signal_connect(pr_entry, "activate", G_CALLBACK(on_add_profile), NULL);
     gtk_box_pack_start(GTK_BOX(row), pr_entry, TRUE, TRUE, 0);
-    pr_add = btn("Добавить", "accent-btn", G_CALLBACK(on_add_profile), NULL);
+    pr_add = btn(N_("Добавить", "Add"), "accent-btn", G_CALLBACK(on_add_profile), NULL);
     gtk_box_pack_start(GTK_BOX(row), pr_add, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), row, FALSE, FALSE, 0);
 
     GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    pr_list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    pr_list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_top(pr_list, 6);
+    gtk_widget_set_margin_end(pr_list, 6);
     gtk_container_add(GTK_CONTAINER(sw), pr_list);
     gtk_box_pack_start(GTK_BOX(box), sw, TRUE, TRUE, 0);
     return box;
@@ -665,8 +730,8 @@ static GtkWidget *page_logs(void)
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_container_set_border_width(GTK_CONTAINER(box), 20);
     GtkWidget *hdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_pack_start(GTK_BOX(hdr), label("Логи ядра", "h1"), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(hdr), btn("Очистить", "flat-btn", G_CALLBACK(on_clear_log), NULL), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hdr), label(N_("Логи ядра", "Core logs"), "h1"), TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(hdr), btn(N_("Очистить", "Clear"), "flat-btn", G_CALLBACK(on_clear_log), NULL), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), hdr, FALSE, FALSE, 0);
     GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
     GtkWidget *tv = gtk_text_view_new();
@@ -684,6 +749,26 @@ static GtkWidget *page_logs(void)
 
 /* ---------- settings page ---------- */
 
+static void fill_themes(void)
+{
+    g_signal_handlers_block_matched(st_theme, G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, GINT_TO_POINTER(1));
+    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(st_theme));
+    GPtrArray *ts = themes_list();
+    for (guint i = 0; i < ts->len; i++) {
+        Theme *t = ts->pdata[i];
+        g_autofree char *nm = t->builtin ? g_strdup(t->name) : g_strdup_printf("%s ✎", t->name);
+        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(st_theme), t->id, nm);
+    }
+    gtk_combo_box_set_active_id(GTK_COMBO_BOX(st_theme), theme_current()->id);
+    g_signal_handlers_unblock_matched(st_theme, G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, GINT_TO_POINTER(1));
+}
+
+static void on_themes_changed(void)
+{
+    apply_theme();
+    if (st_theme) fill_themes();
+}
+
 static void on_theme(GtkComboBox *c, gpointer ud)
 {
     const char *id = gtk_combo_box_get_active_id(c);
@@ -694,26 +779,58 @@ static void on_theme(GtkComboBox *c, gpointer ud)
     apply_theme();
 }
 
+static void on_open_themes(GtkButton *b, gpointer ud)
+{
+    g_autofree char *d = themes_dir();
+    g_autofree char *uri = g_filename_to_uri(d, NULL, NULL);
+    if (uri) g_app_info_launch_default_for_uri(uri, NULL, NULL);
+}
+
 static void on_mode(GtkComboBox *c, gpointer ud)
 {
     int m = gtk_combo_box_get_active(c);
     if (m < 0 || m == S.mode) return;
-    /* leaving proxy mode must undo the system proxy */
     if (S.mode == MODE_PROXY && core_state() == ST_ON) sysproxy_disable();
     S.mode = m;
     settings_save();
     refresh_home();
-    if (m == MODE_TUN && !tun_ready()) ui_toast("Для TUN нажмите «Выдать права для TUN» ниже");
+    if (m == MODE_TUN && !tun_ready())
+        ui_toast(N_("Для TUN нажмите «Выдать права для TUN» ниже", "For TUN, press “Grant TUN permissions” below"));
     core_restart();
+}
+
+static void on_region(GtkComboBox *c, gpointer ud)
+{
+    const char *id = gtk_combo_box_get_active_id(c);
+    if (!id) return;
+    g_free(S.region);
+    S.region = g_strdup(id);
+    settings_save();
+    rules_update_async(FALSE);
+    rebuild_proxies();
+    core_restart();
+}
+
+static void on_lang(GtkComboBox *c, gpointer ud)
+{
+    const char *id = gtk_combo_box_get_active_id(c);
+    if (!id || !strcmp(id, S.lang)) return;
+    g_free(S.lang);
+    S.lang = g_strdup(id);
+    settings_save();
+    ui_toast(N_("Язык сменится после перезапуска", "Language changes after restart"));
 }
 
 static void on_bool(GtkSwitch *sw, GParamSpec *ps, gpointer field)
 {
     *(gboolean *)field = gtk_switch_get_active(sw);
     settings_save();
-    if (field == &S.bypass_ru) {
-        if (S.bypass_ru) rules_update_async(FALSE);
-        core_restart();
+    if (field == &S.auto_skip_region) { rebuild_proxies(); core_restart(); }
+    if (field == &S.animations) {
+        vortex_set_animated(h_vortex, S.animations);
+        vortex_set_animated(brand_vortex, S.animations);
+        gtk_stack_set_transition_type(GTK_STACK(stack), S.animations
+            ? GTK_STACK_TRANSITION_TYPE_CROSSFADE : GTK_STACK_TRANSITION_TYPE_NONE);
     }
 }
 
@@ -732,7 +849,7 @@ static void on_tun_setup(GtkButton *b, gpointer ud)
 static void on_update_rules(GtkButton *b, gpointer ud)
 {
     rules_update_async(TRUE);
-    ui_toast("Правила RU обновляются в фоне");
+    ui_toast(N_("Правила обновляются в фоне", "Rules are updating in the background"));
 }
 
 static GtkWidget *setting_row(const char *title, const char *hint, GtkWidget *ctl)
@@ -763,60 +880,90 @@ static GtkWidget *page_settings(void)
 {
     GtkWidget *outer = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
     gtk_container_set_border_width(GTK_CONTAINER(box), 20);
-    gtk_box_pack_start(GTK_BOX(box), label("Настройки", "h1"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), label(N_("Настройки", "Settings"), "h1"), FALSE, FALSE, 0);
 
+    /* look */
     GtkWidget *c = card();
-    GtkWidget *theme = gtk_combo_box_text_new();
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(theme), "purple", "Фиолетовая");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(theme), "paper", "Бумажная");
-    gtk_combo_box_set_active_id(GTK_COMBO_BOX(theme), S.theme);
-    g_signal_connect(theme, "changed", G_CALLBACK(on_theme), NULL);
-    gtk_box_pack_start(GTK_BOX(c), setting_row("Тема", NULL, theme), FALSE, FALSE, 0);
+    GtkWidget *tb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    st_theme = gtk_combo_box_text_new();
+    fill_themes();
+    g_signal_connect(st_theme, "changed", G_CALLBACK(on_theme), GINT_TO_POINTER(1));
+    gtk_box_pack_start(GTK_BOX(tb), st_theme, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tb), btn(N_("Свои темы…", "Custom themes…"), "flat-btn", G_CALLBACK(on_open_themes), NULL), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Тема", "Theme"),
+        N_("Свои темы — .ini файлы в папке тем, подхватываются на лету (пример: example.ini.sample).",
+           "Custom themes are .ini files in the themes folder, applied live (see example.ini.sample)."), tb), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Анимации", "Animations"), NULL, sw_for(&S.animations)), FALSE, FALSE, 0);
+    GtkWidget *lang = gtk_combo_box_text_new();
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "auto", N_("Системный", "System"));
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "ru", "Русский");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "en", "English");
+    gtk_combo_box_set_active_id(GTK_COMBO_BOX(lang), S.lang);
+    g_signal_connect(lang, "changed", G_CALLBACK(on_lang), NULL);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Язык", "Language"), NULL, lang), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
 
+    /* connection */
     c = card();
     GtkWidget *mode = gtk_combo_box_text_new();
     for (int i = 0; i < 3; i++) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(mode), mode_name(i));
     gtk_combo_box_set_active(GTK_COMBO_BOX(mode), S.mode);
     g_signal_connect(mode, "changed", G_CALLBACK(on_mode), NULL);
-    gtk_box_pack_start(GTK_BOX(c), setting_row("Режим",
-        "TUN — весь трафик системы, как VPN в Hiddify (рекомендуется). Системный прокси — только программы, которые его читают; Firefox может его игнорировать.",
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Режим", "Mode"),
+        N_("TUN — весь трафик системы (рекомендуется). Системный прокси — только программы, которые его читают.",
+           "TUN routes all system traffic (recommended). System proxy only affects apps that honour it."),
         mode), FALSE, FALSE, 0);
+#ifndef G_OS_WIN32
     GtkWidget *tunbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    st_tun_lbl = label(tun_ready() ? "Права выданы ✓" : "Права не выданы", "dim");
+    st_tun_lbl = label(tun_ready() ? N_("Права выданы ✓", "Granted ✓") : N_("Права не выданы", "Not granted"), "dim");
     gtk_box_pack_start(GTK_BOX(tunbox), st_tun_lbl, FALSE, FALSE, 0);
-    st_tun_btn = btn("Выдать права для TUN", "flat-btn", G_CALLBACK(on_tun_setup), NULL);
+    st_tun_btn = btn(N_("Выдать права для TUN", "Grant TUN permissions"), "flat-btn", G_CALLBACK(on_tun_setup), NULL);
     gtk_box_pack_start(GTK_BOX(tunbox), st_tun_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(c), setting_row("TUN",
-        "Один раз копирует sing-box в " WL_TUN_BIN " с правом CAP_NET_ADMIN (спросит пароль). "
-        "Wellide при этом работает без root.", tunbox), FALSE, FALSE, 0);
+        N_("Один раз копирует sing-box в " WL_TUN_BIN " с правом CAP_NET_ADMIN. Сам Wellide работает без root.",
+           "Copies sing-box to " WL_TUN_BIN " once with CAP_NET_ADMIN. Wellide itself never runs as root."),
+        tunbox), FALSE, FALSE, 0);
+#endif
     gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
 
+    /* routing */
     c = card();
-    GtkWidget *rules = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_pack_start(GTK_BOX(rules), btn("Обновить правила", "flat-btn", G_CALLBACK(on_update_rules), NULL), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(rules), sw_for(&S.bypass_ru), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(c), setting_row("Российские сайты напрямую",
-        "Домены .ru/.su/.рф и российские IP идут мимо VPN (Госуслуги, банки, Яндекс).", rules), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(c), setting_row("Подключаться при запуске", NULL, sw_for(&S.autoconnect)), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(c), setting_row("Запускаться свёрнутым в трей", NULL, sw_for(&S.start_hidden)), FALSE, FALSE, 0);
+    GtkWidget *rg = gtk_combo_box_text_new();
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(rg), "", N_("Выключено — всё через VPN", "Off — everything via VPN"));
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(rg), "ru", N_("🇷🇺 Россия", "🇷🇺 Russia"));
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(rg), "ir", N_("🇮🇷 Иран", "🇮🇷 Iran"));
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(rg), "cn", N_("🇨🇳 Китай", "🇨🇳 China"));
+    gtk_combo_box_set_active_id(GTK_COMBO_BOX(rg), S.region);
+    g_signal_connect(rg, "changed", G_CALLBACK(on_region), NULL);
+    GtkWidget *rbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_pack_start(GTK_BOX(rbox), rg, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(rbox), btn(N_("Обновить правила", "Update rules"), "flat-btn", G_CALLBACK(on_update_rules), NULL), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Сайты своей страны напрямую", "Local sites go direct"),
+        N_("Домены и IP выбранной страны идут мимо VPN: банки, госуслуги, местные сервисы.",
+           "That country's domains and IPs bypass the VPN: banks, government, local services."), rbox), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("«Авто» не выбирает серверы этой страны", "“Auto” skips servers in that country"),
+        N_("Такие серверы не помогают с гео-блокировками (ChatGPT и т.п.).", "They don't help with geo-blocked services."),
+        sw_for(&S.auto_skip_region)), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
 
+    /* behaviour */
     c = card();
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Подключаться при запуске", "Connect on launch"), NULL, sw_for(&S.autoconnect)), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Запускаться свёрнутым в трей", "Start minimised to tray"), NULL, sw_for(&S.start_hidden)), FALSE, FALSE, 0);
     GtkWidget *port = gtk_spin_button_new_with_range(1024, 65535, 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(port), S.port);
     g_signal_connect(port, "value-changed", G_CALLBACK(on_port), &S.port);
-    gtk_box_pack_start(GTK_BOX(c), setting_row("Порт прокси (HTTP + SOCKS5)",
-        "Применится при следующем подключении.", port), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Порт прокси (HTTP + SOCKS5)", "Proxy port (HTTP + SOCKS5)"),
+        N_("Применится при следующем подключении.", "Applies on next connect."), port), FALSE, FALSE, 0);
     GtkWidget *aport = gtk_spin_button_new_with_range(1024, 65535, 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(aport), S.api_port);
     g_signal_connect(aport, "value-changed", G_CALLBACK(on_port), &S.api_port);
-    gtk_box_pack_start(GTK_BOX(c), setting_row("Порт Clash API", NULL, aport), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Порт Clash API", "Clash API port"), NULL, aport), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
 
-    gtk_box_pack_start(GTK_BOX(box), label("Wellide " WL_VERSION " · ядро sing-box", "dim"), FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(box), label("Wellide " WL_VERSION " · sing-box · " WL_REPO, "dim"), FALSE, FALSE, 4);
     gtk_container_add(GTK_CONTAINER(outer), box);
     return outer;
 }
@@ -831,7 +978,7 @@ static void show_window(void)
 
 static gboolean on_delete(GtkWidget *w, GdkEvent *e, gpointer ud)
 {
-    if (tray) { gtk_widget_hide(win); return TRUE; }  /* keep running in tray */
+    if (have_tray) { gtk_widget_hide(win); return TRUE; }  /* keep running in the tray */
     return FALSE;
 }
 
@@ -842,21 +989,22 @@ static void do_quit(void)
     core_stop();
 }
 
+#ifdef HAVE_APPINDICATOR
 static void on_tray_show(GtkMenuItem *i, gpointer ud) { show_window(); }
 static void on_tray_toggle(GtkMenuItem *i, gpointer ud) { on_connect(NULL, NULL); }
 static void on_tray_quit(GtkMenuItem *i, gpointer ud) { do_quit(); }
 
 static void build_tray(void)
 {
-    tray = app_indicator_new("wellide", "network-vpn-disconnected", APP_INDICATOR_CATEGORY_COMMUNICATIONS);
+    tray = app_indicator_new("wellide", "wellide", APP_INDICATOR_CATEGORY_COMMUNICATIONS);
     app_indicator_set_status(tray, APP_INDICATOR_STATUS_ACTIVE);
     app_indicator_set_title(tray, "Wellide");
     GtkWidget *m = gtk_menu_new();
-    GtkWidget *show = gtk_menu_item_new_with_label("Открыть Wellide");
+    GtkWidget *show = gtk_menu_item_new_with_label(N_("Открыть Wellide", "Open Wellide"));
     g_signal_connect(show, "activate", G_CALLBACK(on_tray_show), NULL);
-    tray_toggle = gtk_menu_item_new_with_label("Подключиться");
+    tray_toggle = gtk_menu_item_new_with_label(N_("Подключиться", "Connect"));
     g_signal_connect(tray_toggle, "activate", G_CALLBACK(on_tray_toggle), NULL);
-    GtkWidget *quit = gtk_menu_item_new_with_label("Выход");
+    GtkWidget *quit = gtk_menu_item_new_with_label(N_("Выход", "Quit"));
     g_signal_connect(quit, "activate", G_CALLBACK(on_tray_quit), NULL);
     gtk_menu_shell_append(GTK_MENU_SHELL(m), show);
     gtk_menu_shell_append(GTK_MENU_SHELL(m), tray_toggle);
@@ -865,14 +1013,51 @@ static void build_tray(void)
     gtk_widget_show_all(m);
     app_indicator_set_menu(tray, GTK_MENU(m));
     app_indicator_set_secondary_activate_target(tray, show);
+    have_tray = TRUE;
+}
+#else
+/* Windows / no appindicator: classic status icon (native tray on Windows) */
+static void on_si_activate(GtkStatusIcon *si, gpointer ud)
+{
+    if (gtk_widget_get_visible(win)) gtk_widget_hide(win); else show_window();
 }
 
-static GtkWidget *nav_button(GtkWidget *side, const char *text, const char *page)
+static void on_si_menu(GtkStatusIcon *si, guint button, guint time, gpointer ud)
+{
+    GtkWidget *m = gtk_menu_new();
+    GtkWidget *t = gtk_menu_item_new_with_label(core_state() == ST_ON ? N_("Отключиться", "Disconnect") : N_("Подключиться", "Connect"));
+    g_signal_connect_swapped(t, "activate", G_CALLBACK(on_connect), NULL);
+    GtkWidget *q = gtk_menu_item_new_with_label(N_("Выход", "Quit"));
+    g_signal_connect_swapped(q, "activate", G_CALLBACK(do_quit), NULL);
+    gtk_menu_shell_append(GTK_MENU_SHELL(m), t);
+    gtk_menu_shell_append(GTK_MENU_SHELL(m), q);
+    gtk_widget_show_all(m);
+    gtk_menu_popup_at_pointer(GTK_MENU(m), NULL);
+}
+
+static void build_tray(void)
+{
+    const Theme *th = theme_current();
+    g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 2, th->c[TC_INK], th->c[TC_GLOW]);
+    tray = gtk_status_icon_new_from_pixbuf(pb);
+    gtk_status_icon_set_tooltip_text(tray, "Wellide");
+    g_signal_connect(tray, "activate", G_CALLBACK(on_si_activate), NULL);
+    g_signal_connect(tray, "popup-menu", G_CALLBACK(on_si_menu), NULL);
+    have_tray = TRUE;
+}
+#endif
+
+static GtkWidget *nav_button(GtkWidget *side, const char *glyph, const char *text, const char *page)
 {
     GtkWidget *b = gtk_button_new();
+    GtkWidget *h = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *g = gtk_label_new(glyph);
+    gtk_widget_set_size_request(g, 16, -1);
     GtkWidget *l = gtk_label_new(text);
     gtk_label_set_xalign(GTK_LABEL(l), 0);
-    gtk_container_add(GTK_CONTAINER(b), l);
+    gtk_box_pack_start(GTK_BOX(h), g, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(h), l, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(b), h);
     gtk_button_set_relief(GTK_BUTTON(b), GTK_RELIEF_NONE);
     add_class(b, "nav");
     g_signal_connect(b, "clicked", G_CALLBACK(on_nav), (gpointer)page);
@@ -899,34 +1084,48 @@ static void on_activate(GtkApplication *a, gpointer ud)
     css = gtk_css_provider_new();
     gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    apply_theme();
     nav_btns = g_hash_table_new(g_str_hash, g_str_equal);
 
     win = gtk_application_window_new(a);
     gtk_window_set_title(GTK_WINDOW(win), "Wellide");
-    gtk_window_set_default_size(GTK_WINDOW(win), 860, 600);
+    gtk_window_set_default_size(GTK_WINDOW(win), 880, 640);
     gtk_window_set_icon_name(GTK_WINDOW(win), "wellide");
+    {
+        const Theme *th = theme_current();
+        g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 8, th->c[TC_INK], th->c[TC_GLOW]);
+        gtk_window_set_icon(GTK_WINDOW(win), pb);
+    }
     g_signal_connect(win, "delete-event", G_CALLBACK(on_delete), NULL);
 
     GtkWidget *overlay = gtk_overlay_new();
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     GtkWidget *side = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     add_class(side, "sidebar");
-    gtk_widget_set_size_request(side, 190, -1);
-    GtkWidget *brand = label("◆ Wellide", "brand");
+    gtk_widget_set_size_request(side, 196, -1);
+
+    GtkWidget *brand = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    add_class(brand, "brand");
+    brand_vortex = vortex_new(11);
+    gtk_widget_set_size_request(brand_vortex, 33, 33);
+    vortex_set_animated(brand_vortex, S.animations);
+    gtk_box_pack_start(GTK_BOX(brand), brand_vortex, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(brand), label("wellide", NULL), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(side), brand, FALSE, FALSE, 0);
-    nav_button(side, "Главная", "home");
-    nav_button(side, "Серверы", "proxies");
-    nav_button(side, "Профили", "profiles");
-    nav_button(side, "Логи", "logs");
-    nav_button(side, "Настройки", "settings");
-    GtkWidget *quit = btn("Выход", "flat-btn", G_CALLBACK(do_quit), NULL);
+
+    nav_button(side, "◉", N_("Главная", "Home"), "home");
+    nav_button(side, "≡", N_("Серверы", "Servers"), "proxies");
+    nav_button(side, "▤", N_("Профили", "Profiles"), "profiles");
+    nav_button(side, "›_", N_("Логи", "Logs"), "logs");
+    nav_button(side, "⚙", N_("Настройки", "Settings"), "settings");
+    GtkWidget *quit = btn(N_("Выход", "Quit"), "flat-btn", G_CALLBACK(do_quit), NULL);
     gtk_box_pack_end(GTK_BOX(side), quit, FALSE, FALSE, 4);
     gtk_box_pack_start(GTK_BOX(root), side, FALSE, FALSE, 0);
 
     stack = gtk_stack_new();
     add_class(stack, "main-bg");
-    gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_NONE);
+    gtk_stack_set_transition_type(GTK_STACK(stack), S.animations
+        ? GTK_STACK_TRANSITION_TYPE_CROSSFADE : GTK_STACK_TRANSITION_TYPE_NONE);
+    gtk_stack_set_transition_duration(GTK_STACK(stack), 180);
     gtk_stack_add_named(GTK_STACK(stack), page_home(), "home");
     gtk_stack_add_named(GTK_STACK(stack), page_proxies(), "proxies");
     gtk_stack_add_named(GTK_STACK(stack), page_profiles(), "profiles");
@@ -936,7 +1135,8 @@ static void on_activate(GtkApplication *a, gpointer ud)
     gtk_container_add(GTK_CONTAINER(overlay), root);
 
     toast_rev = gtk_revealer_new();
-    gtk_revealer_set_transition_type(GTK_REVEALER(toast_rev), GTK_REVEALER_TRANSITION_TYPE_CROSSFADE);
+    gtk_revealer_set_transition_type(GTK_REVEALER(toast_rev), GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(toast_rev), 220);
     gtk_widget_set_halign(toast_rev, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(toast_rev, GTK_ALIGN_END);
     gtk_widget_set_margin_bottom(toast_rev, 18);
@@ -949,6 +1149,8 @@ static void on_activate(GtkApplication *a, gpointer ud)
     gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), toast_rev, TRUE);
     gtk_container_add(GTK_CONTAINER(win), overlay);
 
+    apply_theme();
+    themes_watch(on_themes_changed);
     build_tray();
     rebuild_proxies();
     rebuild_profiles();
@@ -956,17 +1158,17 @@ static void on_activate(GtkApplication *a, gpointer ud)
     go(PROFILES->len ? "home" : "profiles");
 
     gtk_widget_show_all(overlay);
-    if (!(S.start_hidden && tray)) show_window();
+    if (!(S.start_hidden && have_tray)) show_window();
     g_application_hold(G_APPLICATION(a));
 
-    if (S.bypass_ru) rules_update_async(FALSE);
+    rules_update_async(FALSE);
     auto_update(NULL);
     g_timeout_add_seconds(1800, auto_update, NULL);
+    schedule_ping(1);
     if (S.autoconnect && PROFILES->len) core_start();
 }
 
-/* CLI control, forwarded to the primary instance by GApplication:
- *   wellide --import <url|link>  --connect  --disconnect  --toggle  --quit  --status */
+/* CLI control, forwarded to the primary instance by GApplication */
 static int on_command_line(GApplication *a, GApplicationCommandLine *cl, gpointer ud)
 {
     int argc;
@@ -977,6 +1179,12 @@ static int on_command_line(GApplication *a, GApplicationCommandLine *cl, gpointe
         if (!strcmp(o, "--import") && i + 1 < argc) {
             if (!win) on_activate(GTK_APPLICATION(a), NULL);
             profile_add_async(argv[++i], on_profile_done, NULL);
+            ui_only = FALSE;
+        } else if (g_str_has_prefix(o, "wellide://import/")) {
+            /* deep link: wellide://import/<url-encoded subscription> */
+            if (!win) on_activate(GTK_APPLICATION(a), NULL);
+            g_autofree char *u = g_uri_unescape_string(o + 17, NULL);
+            if (u) profile_add_async(u, on_profile_done, NULL);
             ui_only = FALSE;
         } else if (!strcmp(o, "--connect")) {
             if (!win) on_activate(GTK_APPLICATION(a), NULL);
@@ -1001,9 +1209,12 @@ static int on_command_line(GApplication *a, GApplicationCommandLine *cl, gpointe
             ui_only = FALSE;
         } else if (!strcmp(o, "--hidden")) {
             S.start_hidden = TRUE;
+        } else if (!strcmp(o, "--version")) {
+            g_application_command_line_print(cl, "wellide %s\n", WL_VERSION);
+            return 0;
         } else if (!strcmp(o, "--help") || !strcmp(o, "-h")) {
             g_application_command_line_print(cl,
-                "wellide [--hidden] [--import URL] [--connect|--disconnect|--toggle] [--status] [--quit]\n");
+                "wellide [--hidden] [--import URL] [--connect|--disconnect|--toggle] [--status] [--quit] [--version]\n");
             return 0;
         }
     }
@@ -1017,19 +1228,21 @@ static void on_shutdown(GApplication *a, gpointer ud)
     sysproxy_disable();
 }
 
-/* "startup" runs only in the primary instance. Remote invocations
- * (wellide --status etc.) must not touch state, or they would undo the
- * running instance's system proxy. */
+/* "startup" runs only in the primary instance; remote invocations
+ * (wellide --status etc.) must not touch state */
 static void on_startup(GApplication *a, gpointer ud)
 {
     if (S.sysproxy_set) sysproxy_disable();   /* previous run crashed */
     HTTP = soup_session_new_with_options("timeout", 30, NULL);
     profiles_load();
+    themes_reload();
+#ifndef G_OS_WIN32
     g_unix_signal_add(SIGINT, on_signal, NULL);
     g_unix_signal_add(SIGTERM, on_signal, NULL);
+#endif
 }
 
-static gboolean on_signal(gpointer ud)
+static G_GNUC_UNUSED gboolean on_signal(gpointer ud)
 {
     do_quit();
     return G_SOURCE_CONTINUE;
@@ -1038,11 +1251,10 @@ static gboolean on_signal(gpointer ud)
 int main(int argc, char **argv)
 {
     settings_load();
-
     app = gtk_application_new(WL_APP_ID, G_APPLICATION_HANDLES_COMMAND_LINE);
     g_signal_connect(app, "command-line", G_CALLBACK(on_command_line), NULL);
-    g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
     g_signal_connect(app, "startup", G_CALLBACK(on_startup), NULL);
+    g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
     g_signal_connect(app, "shutdown", G_CALLBACK(on_shutdown), NULL);
     int r = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);

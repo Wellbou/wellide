@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.wellbou.wellide</id>
+  <launchable type="desktop-id">wellide.desktop</launchable>
+  <name>Wellide</name>
+  <summary>Lightweight sing-box VPN client</summary>
+  <summary xml:lang="ru">Лёгкий VPN-клиент на sing-box</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <url type="homepage">https://github.com/Wellbou/wellide</url>
+  <description>
+    <p>A small GTK client for sing-box: subscriptions, TUN mode, automatic ping and themes, in about 60 MB of RAM.</p>
+  </description>
+  <releases><release version="0.2.0" date="2026-09-28"/></releases>
+</component>

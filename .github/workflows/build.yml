@@ -1,0 +1,85 @@
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SINGBOX_VERSION: 1.14.2
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config libgtk-3-dev libjson-glib-dev libsoup-3.0-dev libayatana-appindicator3-dev
+      - run: make -j4 CFLAGS="-O2 -Werror"
+      - run: ./wellide --version
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make zip unzip
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk3 mingw-w64-ucrt-x86_64-json-glib
+            mingw-w64-ucrt-x86_64-libsoup3 mingw-w64-ucrt-x86_64-glib-networking
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme mingw-w64-ucrt-x86_64-nsis
+      - name: build
+        run: make -j4 OS=Windows_NT
+      - name: bundle
+        run: |
+          set -e
+          D=packaging/windows/dist
+          mkdir -p $D/bin $D/lib $D/share/glib-2.0/schemas $D/share/icons
+          cp wellide.exe $D/bin/
+          # every DLL the binary (transitively) needs from the UCRT64 prefix
+          for f in $(ldd wellide.exe | awk '/ucrt64/ {print $3}'); do cp "$f" $D/bin/; done
+          cp /ucrt64/bin/gdbus.exe $D/bin/ || true
+          # TLS for libsoup + pixbuf loaders + schemas + icons
+          cp -r /ucrt64/lib/gio $D/lib/
+          for f in /ucrt64/lib/gio/modules/*.dll; do for d in $(ldd "$f" | awk '/ucrt64/ {print $3}'); do cp -n "$d" $D/bin/; done; done
+          cp -r /ucrt64/lib/gdk-pixbuf-2.0 $D/lib/
+          cp /ucrt64/share/glib-2.0/schemas/gschemas.compiled $D/share/glib-2.0/schemas/
+          cp -r /ucrt64/share/icons/Adwaita /ucrt64/share/icons/hicolor $D/share/icons/
+          mkdir -p $D/etc/gtk-3.0
+          printf '[Settings]\ngtk-font-name=Segoe UI 10\n' > $D/etc/gtk-3.0/settings.ini
+          # sing-box + wintun
+          curl -fsSL -o sb.zip https://github.com/SagerNet/sing-box/releases/download/v$SINGBOX_VERSION/sing-box-$SINGBOX_VERSION-windows-amd64.zip
+          unzip -q sb.zip && cp sing-box-*/sing-box.exe $D/bin/
+          curl -fsSL -o wt.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          unzip -q wt.zip && cp wintun/bin/amd64/wintun.dll $D/bin/
+          ls -la $D/bin | head -80
+      - name: installer
+        run: |
+          V=$(grep -o 'WL_VERSION "[^"]*"' src/wellide.h | cut -d'"' -f2)
+          cd packaging/windows && makensis -DVERSION=$V wellide.nsi
+          (cd dist && zip -qr ../wellide-$V-windows-portable.zip .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wellide-windows
+          path: |
+            packaging/windows/*-setup.exe
+            packaging/windows/*-portable.zip
+      - name: release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaging/windows/*-setup.exe
+            packaging/windows/*-portable.zip

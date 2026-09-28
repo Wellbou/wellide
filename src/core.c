@@ -1,9 +1,11 @@
 /* sing-box process management + Clash API client. */
 #include "wellide.h"
 #include <gio/gio.h>
-#include <signal.h>
 #include <string.h>
+#ifndef G_OS_WIN32
+#include <signal.h>
 #include <sys/xattr.h>
+#endif
 
 #define TEST_URL "https://www.gstatic.com/generate_204"
 
@@ -36,12 +38,47 @@ static char *api_url(const char *path)
     return g_strdup_printf("http://127.0.0.1:%d%s", S.api_port, path);
 }
 
-/* ---------- TUN helper binary ---------- */
+/* ---------- core binary / TUN permissions ----------
+ * Linux: TUN needs CAP_NET_ADMIN. We keep a private copy of sing-box with
+ * that capability (installed by install.sh or the settings button), so
+ * Wellide itself never runs as root.
+ * Windows: the installer ships sing-box.exe + wintun.dll next to
+ * wellide.exe and the app runs elevated (manifest), so TUN just works. */
+
+#ifdef G_OS_WIN32
+static char *exe_dir(void)
+{
+    g_autofree char *d = g_win32_get_package_installation_directory_of_module(NULL);
+    return g_build_filename(d, "bin", NULL);
+}
+#endif
+
+const char *core_bin(void)
+{
+    static char *bin;
+    if (bin) return bin;
+    const char *env = g_getenv("WELLIDE_SINGBOX");
+    if (env && *env) return bin = g_strdup(env);
+#ifdef G_OS_WIN32
+    g_autofree char *d = exe_dir();
+    bin = g_build_filename(d, "sing-box.exe", NULL);
+    if (!g_file_test(bin, G_FILE_TEST_EXISTS)) { g_free(bin); bin = g_strdup("sing-box.exe"); }
+#else
+    bin = g_find_program_in_path("sing-box");
+    if (!bin && g_file_test(WL_TUN_BIN, G_FILE_TEST_IS_EXECUTABLE)) bin = g_strdup(WL_TUN_BIN);
+    if (!bin) bin = g_strdup("sing-box");
+#endif
+    return bin;
+}
 
 gboolean tun_ready(void)
 {
+#ifdef G_OS_WIN32
+    return TRUE;
+#else
     if (!g_file_test(WL_TUN_BIN, G_FILE_TEST_IS_EXECUTABLE)) return FALSE;
     return getxattr(WL_TUN_BIN, "security.capability", NULL, 0) > 0;
+#endif
 }
 
 static void on_setup_done(GObject *src, GAsyncResult *res, gpointer ud)
@@ -49,37 +86,75 @@ static void on_setup_done(GObject *src, GAsyncResult *res, gpointer ud)
     GError *e = NULL;
     gboolean ok = g_subprocess_wait_check_finish(G_SUBPROCESS(src), res, &e);
     ok = ok && tun_ready();
-    ui_on_tun_setup(ok, ok ? "TUN готов" : (e ? e->message : "не удалось выдать права"));
+    ui_on_tun_setup(ok, ok ? N_("TUN готов", "TUN is ready")
+                           : (e ? e->message : N_("не удалось выдать права", "could not grant permissions")));
     g_clear_error(&e);
     g_object_unref(src);
 }
 
+static const char POLKIT_RULE[] =
+    "// Wellide TUN: let members of the wellide group set DNS on the tunnel\n"
+    "polkit.addRule(function(action, subject) {\n"
+    "    if (action.id.indexOf(\"org.freedesktop.resolve1.set-\") == 0 ||\n"
+    "        action.id == \"org.freedesktop.resolve1.revert\") {\n"
+    "        if (subject.local && subject.active && subject.isInGroup(\"wellide\"))\n"
+    "            return polkit.Result.YES;\n"
+    "    }\n"
+    "});";
+
 void tun_setup_async(void)
 {
+#ifdef G_OS_WIN32
+    ui_on_tun_setup(TRUE, N_("TUN готов", "TUN is ready"));
+#else
     g_autofree char *sb = g_find_program_in_path("sing-box");
-    if (!sb) { ui_on_tun_setup(FALSE, "sing-box не найден в PATH"); return; }
-    /* private copy of sing-box with network caps: group-restricted to the
-     * current user, so TUN works without running anything as root */
+    if (!sb) { ui_on_tun_setup(FALSE, N_("sing-box не найден в PATH", "sing-box not found in PATH")); return; }
+    /* The capable copy is group-restricted (0750, the user's own group).
+     * The polkit rule lets members of "wellide" set DNS on the TUN link
+     * via systemd-resolved; polkit resolves groups from the user database,
+     * so it works without logging out. */
+    const char *user = g_get_user_name();
     g_autofree char *script = g_strdup_printf(
-        "install -D -o root -g %u -m 0750 '%s' '%s' && "
-        "setcap cap_net_admin,cap_net_raw,cap_net_bind_service+ep '%s'",
-        (unsigned)getgid(), sb, WL_TUN_BIN, WL_TUN_BIN);
+        "set -e; install -D -o root -g %u -m 0750 '%s' '%s'; "
+        "setcap cap_net_admin,cap_net_raw,cap_net_bind_service+ep '%s'; "
+        "if [ -d /etc/polkit-1/rules.d ]; then "
+        "  getent group wellide >/dev/null || groupadd -r wellide; "
+        "  usermod -aG wellide '%s'; "
+        "  printf '%%s\\n' \"$0\" > /etc/polkit-1/rules.d/49-wellide.rules; "
+        "fi",
+        (unsigned)getgid(), sb, WL_TUN_BIN, WL_TUN_BIN, user);
     GError *e = NULL;
     GSubprocess *p = g_subprocess_new(G_SUBPROCESS_FLAGS_NONE, &e,
-                                      "pkexec", "/bin/sh", "-c", script, NULL);
+                                      "pkexec", "/bin/sh", "-c", script, POLKIT_RULE, NULL);
     if (!p) { ui_on_tun_setup(FALSE, e->message); g_error_free(e); return; }
     g_subprocess_wait_check_async(p, NULL, on_setup_done, NULL);
+#endif
 }
 
 /* ---------- config generation ---------- */
 
-gboolean server_is_ru(Server *s)
+/* a server that exits inside the bypass country can't unblock anything */
+gboolean server_in_region(Server *s)
 {
-    return s->name && (strstr(s->name, "🇷🇺") || g_str_has_prefix(s->name, "RU ") ||
-                       strstr(s->name, "[RU]"));
+    if (!S.region || !*S.region || !s->cc) return FALSE;
+    return !g_ascii_strcasecmp(s->cc, S.region);
 }
 
-static void add_str_array(JsonBuilder *b, const char *name, const char **v)
+typedef struct { const char *region; const char *suffix[4]; const char *geoip, *geosite; } Region;
+static const Region REGIONS[] = {
+    { "ru", { ".ru", ".su", ".xn--p1ai", NULL }, "geoip-ru", "geosite-category-ru" },
+    { "ir", { ".ir", NULL },                    "geoip-ir", "geosite-category-ir" },
+    { "cn", { ".cn", NULL },                    "geoip-cn", "geosite-cn" },
+};
+
+static const Region *region_cur(void)
+{
+    for (guint i = 0; S.region && i < G_N_ELEMENTS(REGIONS); i++)
+        if (!strcmp(REGIONS[i].region, S.region)) return &REGIONS[i];
+    return NULL;
+}
+
+static void add_str_array(JsonBuilder *b, const char *name, const char *const *v)
 {
     json_builder_set_member_name(b, name);
     json_builder_begin_array(b);
@@ -91,13 +166,15 @@ static char *build_config(Profile *p, GError **err)
 {
     int n = profile_server_count(p);
     if (n == 0) {
-        g_set_error_literal(err, G_IO_ERROR, G_IO_ERROR_FAILED, "в профиле нет серверов");
+        g_set_error_literal(err, G_IO_ERROR, G_IO_ERROR_FAILED, N_("в профиле нет серверов", "the profile has no servers"));
         return NULL;
     }
-    g_autofree char *geoip = rules_path("geoip-ru.srs");
-    g_autofree char *geosite = rules_path("geosite-ru.srs");
-    gboolean have_geoip = S.bypass_ru && g_file_test(geoip, G_FILE_TEST_EXISTS);
-    gboolean have_geosite = S.bypass_ru && g_file_test(geosite, G_FILE_TEST_EXISTS);
+    const Region *rg = region_cur();
+    gboolean have_geoip = FALSE, have_geosite = FALSE;
+    if (rg) rules_available(rg->region, &have_geoip, &have_geosite);
+    g_autofree char *geoip = rg ? rules_path(rg->geoip) : NULL;
+    g_autofree char *geosite = rg ? rules_path(rg->geosite) : NULL;
+    gboolean bypass = rg != NULL;
     gboolean tun = S.mode == MODE_TUN;
 
     const char *sel = S.selected && *S.selected ? S.selected : "auto";
@@ -131,19 +208,21 @@ static char *build_config(Profile *p, GError **err)
       json_builder_begin_object(b);
       json_builder_set_member_name(b, "type"); json_builder_add_string_value(b, "udp");
       json_builder_set_member_name(b, "tag"); json_builder_add_string_value(b, "local");
-      json_builder_set_member_name(b, "server"); json_builder_add_string_value(b, "77.88.8.8");
+      json_builder_set_member_name(b, "server");
+      json_builder_add_string_value(b, !g_strcmp0(S.region, "ru") ? "77.88.8.8"
+                                       : !g_strcmp0(S.region, "cn") ? "223.5.5.5" : "9.9.9.9");
       json_builder_end_object(b);
     json_builder_end_array(b);
     json_builder_set_member_name(b, "rules");
     json_builder_begin_array(b);
-    if (S.bypass_ru) {
+    if (bypass) {
         json_builder_begin_object(b);
-        add_str_array(b, "domain_suffix", (const char *[]){ ".ru", ".su", ".xn--p1ai", NULL });
+        add_str_array(b, "domain_suffix", rg->suffix);
         json_builder_set_member_name(b, "server"); json_builder_add_string_value(b, "local");
         json_builder_end_object(b);
         if (have_geosite) {
             json_builder_begin_object(b);
-            add_str_array(b, "rule_set", (const char *[]){ "geosite-ru", NULL });
+            add_str_array(b, "rule_set", (const char *[]){ "geosite-local", NULL });
             json_builder_set_member_name(b, "server"); json_builder_add_string_value(b, "local");
             json_builder_end_object(b);
         }
@@ -208,11 +287,11 @@ static char *build_config(Profile *p, GError **err)
           int foreign = 0;
           for (guint i = 0; i < p->servers->len; i++) {
               Server *s = p->servers->pdata[i];
-              if (!s->separator && !server_is_ru(s)) foreign++;
+              if (!s->separator && !server_in_region(s)) foreign++;
           }
           for (guint i = 0; i < p->servers->len; i++) {
               Server *s = p->servers->pdata[i];
-              if (s->separator || (foreign && server_is_ru(s))) continue;
+              if (s->separator || (S.auto_skip_region && foreign && server_in_region(s))) continue;
               json_builder_add_string_value(b, s->tag);
           }
       }
@@ -254,17 +333,17 @@ static char *build_config(Profile *p, GError **err)
       json_builder_set_member_name(b, "ip_is_private"); json_builder_add_boolean_value(b, TRUE);
       json_builder_set_member_name(b, "outbound"); json_builder_add_string_value(b, "direct");
       json_builder_end_object(b);
-    if (S.bypass_ru) {
+    if (bypass) {
       json_builder_begin_object(b);
-      add_str_array(b, "domain_suffix", (const char *[]){ ".ru", ".su", ".xn--p1ai", NULL });
+      add_str_array(b, "domain_suffix", rg->suffix);
       json_builder_set_member_name(b, "outbound"); json_builder_add_string_value(b, "direct");
       json_builder_end_object(b);
       if (have_geoip || have_geosite) {
         json_builder_begin_object(b);
         const char *sets[3] = { NULL };
         int k = 0;
-        if (have_geosite) sets[k++] = "geosite-ru";
-        if (have_geoip) sets[k++] = "geoip-ru";
+        if (have_geosite) sets[k++] = "geosite-local";
+        if (have_geoip) sets[k++] = "geoip-local";
         add_str_array(b, "rule_set", sets);
         json_builder_set_member_name(b, "outbound"); json_builder_add_string_value(b, "direct");
         json_builder_end_object(b);
@@ -274,7 +353,7 @@ static char *build_config(Profile *p, GError **err)
     if (have_geoip || have_geosite) {
       json_builder_set_member_name(b, "rule_set");
       json_builder_begin_array(b);
-      const char *tags[] = { "geosite-ru", "geoip-ru" };
+      const char *tags[] = { "geosite-local", "geoip-local" };
       const char *paths[] = { geosite, geoip };
       gboolean have[] = { have_geosite, have_geoip };
       for (int i = 0; i < 2; i++) {
@@ -391,7 +470,7 @@ static void on_core_exit(GObject *src, GAsyncResult *res, gpointer ud)
         set_state(ST_OFF, NULL);
     } else {
         g_autofree char *e = last_err->len ? g_strdup(last_err->str)
-                                           : g_strdup("ядро sing-box неожиданно завершилось");
+                                           : g_strdup(N_("ядро sing-box неожиданно завершилось", "sing-box exited unexpectedly"));
         g_strstrip(e);
         set_state(ST_OFF, e);
     }
@@ -428,7 +507,7 @@ static gboolean poll_ready(gpointer ud)
     if (state != ST_STARTING) { ready_poll = 0; return G_SOURCE_REMOVE; }
     if (++ready_tries > 60) {                      /* 15 s */
         ready_poll = 0;
-        g_string_append(last_err, "ядро не ответило за 15 секунд\n");
+        g_string_append(last_err, N_("ядро не ответило за 15 секунд\n", "the core did not respond within 15 s\n"));
         core_stop();
         return G_SOURCE_REMOVE;
     }
@@ -445,15 +524,17 @@ void core_start(void)
     g_string_truncate(last_err, 0);
 
     Profile *p = profile_active();
-    if (!p) { ui_on_state(ST_OFF, "сначала добавьте профиль (подписку)"); return; }
+    if (!p) { ui_on_state(ST_OFF, N_("сначала добавьте профиль (подписку)", "add a profile (subscription) first")); return; }
 
-    const char *bin = "sing-box";
+    const char *bin = core_bin();
     if (S.mode == MODE_TUN) {
         if (!tun_ready()) {
-            ui_on_state(ST_OFF, "для TUN нужны права: Настройки → «Выдать права для TUN»");
+            ui_on_state(ST_OFF, N_("для TUN нужны права: Настройки → «Выдать права для TUN»", "TUN needs permissions: Settings → “Grant TUN permissions”"));
             return;
         }
+#ifndef G_OS_WIN32
         bin = WL_TUN_BIN;
+#endif
     }
 
     GError *e = NULL;
@@ -499,7 +580,11 @@ void core_stop(void)
     stop_polls();
     if (S.mode == MODE_PROXY || S.sysproxy_set) sysproxy_disable();
     set_state(ST_STOPPING, NULL);
+#ifdef G_OS_WIN32
+    g_subprocess_force_exit(proc);
+#else
     g_subprocess_send_signal(proc, SIGTERM);
+#endif
     g_timeout_add_seconds(4, force_kill, g_object_ref(proc));
 }
 
@@ -542,8 +627,32 @@ void core_select(const char *tag)
     core_check_ip();
 }
 
-/* delay: via Clash API while running, plain TCP connect time otherwise */
-typedef struct { char *tag; SoupMessage *m; gint64 t0; } Delay;
+/* delay: via Clash API while running, plain TCP connect time otherwise.
+ * core_test_all() feeds a queue with limited concurrency so a big list
+ * doesn't stampede the network or the core. */
+typedef struct { char *tag; SoupMessage *m; gint64 t0; gboolean queued; } Delay;
+
+static GQueue ping_q = G_QUEUE_INIT;
+static int ping_inflight;
+static void test_one(const char *tag, gboolean queued);
+
+static void ping_pump(void)
+{
+    while (ping_inflight < 6 && !g_queue_is_empty(&ping_q)) {
+        g_autofree char *tag = g_queue_pop_head(&ping_q);
+        ping_inflight++;
+        test_one(tag, TRUE);
+    }
+}
+
+static void delay_finish(Delay *d, int ms, gboolean tcp)
+{
+    ui_on_delay(d->tag, ms, tcp);
+    if (d->queued) { ping_inflight--; ping_pump(); }
+    if (d->m) g_object_unref(d->m);
+    g_free(d->tag);
+    g_free(d);
+}
 
 static void on_delay(GObject *src, GAsyncResult *res, gpointer ud)
 {
@@ -558,8 +667,7 @@ static void on_delay(GObject *src, GAsyncResult *res, gpointer ud)
             ms = json_object_get_int_member_with_default(json_node_get_object(json_parser_get_root(p)), "delay", 0);
     }
     if (b) g_bytes_unref(b);
-    ui_on_delay(d->tag, ms, FALSE);
-    g_object_unref(d->m); g_free(d->tag); g_free(d);
+    delay_finish(d, ms, FALSE);
 }
 
 static void on_tcp(GObject *src, GAsyncResult *res, gpointer ud)
@@ -568,30 +676,47 @@ static void on_tcp(GObject *src, GAsyncResult *res, gpointer ud)
     GSocketConnection *c = g_socket_client_connect_to_host_finish(G_SOCKET_CLIENT(src), res, NULL);
     int ms = c ? MAX(1, (int)((g_get_monotonic_time() - d->t0) / 1000)) : 0;
     if (c) { g_io_stream_close(G_IO_STREAM(c), NULL, NULL); g_object_unref(c); }
-    ui_on_delay(d->tag, ms, TRUE);
-    g_object_unref(src); g_free(d->tag); g_free(d);
+    g_object_unref(src);
+    delay_finish(d, ms, TRUE);
 }
 
-void core_test_delay(const char *tag)
+static void test_one(const char *tag, gboolean queued)
 {
     Delay *d = g_new0(Delay, 1);
     d->tag = g_strdup(tag);
+    d->queued = queued;
     if (state == ST_ON) {
         g_autofree char *esc = g_uri_escape_string(tag, NULL, FALSE);
         g_autofree char *path = g_strdup_printf("/proxies/%s/delay?timeout=5000&url=%s", esc, TEST_URL);
         g_autofree char *u = api_url(path);
         d->m = soup_message_new("GET", u);
-        if (!d->m) { ui_on_delay(tag, 0, FALSE); g_free(d->tag); g_free(d); return; }
+        if (!d->m) { delay_finish(d, 0, FALSE); return; }
         soup_session_send_and_read_async(api_session(), d->m, G_PRIORITY_DEFAULT, NULL, on_delay, d);
         return;
     }
     Server *s = profile_find_server(profile_active(), tag);
-    if (!s || !s->server) { ui_on_delay(tag, 0, TRUE); g_free(d->tag); g_free(d); return; }
+    if (!s || !s->server) { delay_finish(d, 0, TRUE); return; }
     GSocketClient *c = g_socket_client_new();
     g_socket_client_set_timeout(c, 4);
     g_socket_client_set_enable_proxy(c, FALSE);
     d->t0 = g_get_monotonic_time();
     g_socket_client_connect_to_host_async(c, s->server, s->port, NULL, on_tcp, d);
+}
+
+void core_test_delay(const char *tag) { test_one(tag, FALSE); }
+
+void core_test_all(void)
+{
+    Profile *p = profile_active();
+    if (!p) return;
+    while (!g_queue_is_empty(&ping_q)) g_free(g_queue_pop_head(&ping_q));
+    for (guint i = 0; i < p->servers->len; i++) {
+        Server *s = p->servers->pdata[i];
+        if (s->separator) continue;
+        ui_on_delay(s->tag, -2, state != ST_ON);
+        g_queue_push_tail(&ping_q, g_strdup(s->tag));
+    }
+    ping_pump();
 }
 
 /* traffic: /traffic streams one JSON object per second */

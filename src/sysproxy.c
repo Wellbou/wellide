@@ -5,6 +5,59 @@
 #include "wellide.h"
 #include <string.h>
 
+#ifdef G_OS_WIN32
+/* ---------- Windows: WinINet per-user proxy ---------- */
+#include <windows.h>
+#include <wininet.h>
+
+static void win_notify(void)
+{
+    InternetSetOptionW(NULL, INTERNET_OPTION_SETTINGS_CHANGED, NULL, 0);
+    InternetSetOptionW(NULL, INTERNET_OPTION_REFRESH, NULL, 0);
+}
+
+void sysproxy_enable(int port)
+{
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            0, KEY_READ | KEY_WRITE, &k) != ERROR_SUCCESS) return;
+    if (!S.sysproxy_set) {
+        DWORD v = 0, sz = sizeof v;
+        RegQueryValueExW(k, L"ProxyEnable", NULL, NULL, (BYTE *)&v, &sz);
+        S.win_prev_enable = (int)v;
+    }
+    wchar_t srv[64];
+    swprintf(srv, 64, L"127.0.0.1:%d", port);
+    DWORD one = 1;
+    RegSetValueExW(k, L"ProxyServer", 0, REG_SZ, (BYTE *)srv, (DWORD)((wcslen(srv) + 1) * sizeof(wchar_t)));
+    const wchar_t *bypass = L"localhost;127.*;10.*;172.16.*;192.168.*;<local>";
+    RegSetValueExW(k, L"ProxyOverride", 0, REG_SZ, (BYTE *)bypass, (DWORD)((wcslen(bypass) + 1) * sizeof(wchar_t)));
+    RegSetValueExW(k, L"ProxyEnable", 0, REG_DWORD, (BYTE *)&one, sizeof one);
+    RegCloseKey(k);
+    win_notify();
+    S.sysproxy_set = TRUE;
+    settings_save();
+}
+
+void sysproxy_disable(void)
+{
+    if (!S.sysproxy_set) return;
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            0, KEY_WRITE, &k) == ERROR_SUCCESS) {
+        DWORD v = (DWORD)S.win_prev_enable;
+        RegSetValueExW(k, L"ProxyEnable", 0, REG_DWORD, (BYTE *)&v, sizeof v);
+        RegCloseKey(k);
+        win_notify();
+    }
+    S.sysproxy_set = FALSE;
+    settings_save();
+}
+
+#else /* ---------- Linux: KDE + GNOME ---------- */
+
 static void run(const char *const *argv)
 {
     g_autofree char *bin = g_find_program_in_path(argv[0]);
@@ -116,7 +169,7 @@ static gboolean recheck(gpointer ud)
     g_autofree char *gm = gnome_proxy ? g_settings_get_string(gnome_proxy, "mode") : g_strdup("manual");
     if (strcmp(kt, "1") || strcmp(gm, "manual")) {
         sysproxy_enable(watch_port);
-        ui_toast("Кто-то выключил системный прокси — включил обратно");
+        ui_toast(N_("Кто-то выключил системный прокси — включил обратно", "Something reset the system proxy — restored it"));
     }
     return G_SOURCE_REMOVE;
 }
@@ -173,3 +226,5 @@ void sysproxy_disable(void)
     S.sysproxy_set = FALSE;
     settings_save();
 }
+
+#endif

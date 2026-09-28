@@ -15,8 +15,9 @@ else
 endif
 
 CFLAGS ?= -O2 -pipe
-CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
-          $(shell $(PKG_CONFIG) --cflags $(PKGS))
+# package flags go to CPPFLAGS so `make CFLAGS=...` can't drop them
+CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(PKGS))
+override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(PKGS)) -lm
 ifneq ($(OS),Windows_NT)
   LDFLAGS += -Wl,-O1,--as-needed

@@ -944,11 +944,13 @@ static GtkWidget *port_entry(int *field)
     return e;
 }
 
+#ifndef G_OS_WIN32
 static void on_tun_setup(GtkButton *b, gpointer ud)
 {
     gtk_widget_set_sensitive(st_tun_btn, FALSE);
     tun_setup_async();
 }
+#endif
 
 static void on_update_rules(GtkButton *b, gpointer ud)
 {

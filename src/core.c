@@ -82,6 +82,7 @@ gboolean tun_ready(void)
 #endif
 }
 
+#ifndef G_OS_WIN32
 static void on_setup_done(GObject *src, GAsyncResult *res, gpointer ud)
 {
     GError *e = NULL;
@@ -92,7 +93,9 @@ static void on_setup_done(GObject *src, GAsyncResult *res, gpointer ud)
     g_clear_error(&e);
     g_object_unref(src);
 }
+#endif
 
+#ifndef G_OS_WIN32
 /* polkit checks the groups of the *running* session, so a group freshly
  * added by setup would only work after logging in again. Each user who
  * runs setup therefore also gets a per-user rule that works immediately. */
@@ -116,6 +119,8 @@ static char *polkit_user_rule(const char *user)
         "        return polkit.Result.YES;\n"
         "});", user, user);
 }
+
+#endif
 
 void tun_setup_async(void)
 {

@@ -1,6 +1,8 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Wellide — lightweight sing-box GUI (GTK3). */
 #include "wellide.h"
 #include <string.h>
+#include <math.h>
 #ifdef HAVE_APPINDICATOR
 #include <libayatana-appindicator/app-indicator.h>
 #endif
@@ -35,6 +37,9 @@ static gboolean quitting;
 static guint ping_timer;
 
 static void tray_update(void);
+#ifdef HAVE_APPINDICATOR
+static void tray_theme_changed(void);
+#endif
 static void rebuild_proxies(void);
 static void rebuild_profiles(void);
 static void refresh_home(void);
@@ -102,10 +107,14 @@ static void apply_theme(void)
     g_autofree char *c = theme_css(t);
     gtk_css_provider_load_from_data(css, c, -1, NULL);
     if (h_vortex) vortex_set_theme(h_vortex, t);
+#ifdef HAVE_APPINDICATOR
+    tray_theme_changed();
+#endif
     tray_update();
     if (brand_icon) {
-        g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 2, t->c[TC_INK], t->c[TC_GLOW]);
-        gtk_image_set_from_pixbuf(GTK_IMAGE(brand_icon), pb);
+        cairo_surface_t *cs = vortex_icon_surface(16, 2, "#6a4a7a", t->c[TC_GLOW]);
+        gtk_image_set_from_surface(GTK_IMAGE(brand_icon), cs);
+        cairo_surface_destroy(cs);
     }
     if (h_graph) graph_set_colors(h_graph, t->c[TC_GLOW], t->c[TC_ACCENT], t->c[TC_LINE]);
 }
@@ -141,30 +150,38 @@ static void on_nav(GtkButton *b, gpointer page) { go(page); }
 
 #ifdef HAVE_APPINDICATOR
 /* Tray icons are rendered by the app into ~/.cache/wellide/tray/ with the
- * current theme colours. The name includes the colours, so Plasma (which
- * caches icons by name) can never show a stale one. */
+ * current theme colours. Plasma caches icons by name, so we pass an
+ * absolute file path whose name alternates on every theme change: a new
+ * path is always reloaded. PNGs are written with cairo, not gdk-pixbuf:
+ * newer gdk-pixbuf routes image work through sandboxed glycin helper
+ * processes, ~40 MB for a 64-pixel icon. */
 static char *tray_dir;
+static guint tray_gen;
 
 static const char *tray_icon(gboolean on)
 {
-    static char name[96];
+    static char path[512];
     const Theme *t = theme_current();
-    guint h = g_str_hash(t->c[TC_GLOW]) ^ (g_str_hash(t->c[TC_INK]) * 31) ^ (g_str_hash(WL_VERSION) * 131);
-    g_snprintf(name, sizeof name, "wellide-tray-%08x-%s", h, on ? "on" : "off");
     if (!tray_dir) {
         g_autofree char *c = wl_cache_dir();
         tray_dir = g_build_filename(c, "tray", NULL);
         g_mkdir_with_parents(tray_dir, 0700);
     }
-    g_autofree char *file = g_strdup_printf("%s/%s.png", tray_dir, name);
-    if (!g_file_test(file, G_FILE_TEST_EXISTS)) {
-        /* 64px: whirl, dimmed when off */
-        g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 4, "#6a4a7a", t->c[TC_GLOW]);
-        if (!on) gdk_pixbuf_saturate_and_pixelate(pb, pb, 0.1, FALSE);   /* grey when off */
-        gdk_pixbuf_save(pb, file, "png", NULL, NULL);
+    g_snprintf(path, sizeof path, "%s/wellide-tray-%s-%u.png", tray_dir, on ? "on" : "off", tray_gen & 1);
+    GdkRGBA g;
+    if (!gdk_rgba_parse(&g, t->c[TC_GLOW])) gdk_rgba_parse(&g, "#ca31cc");
+    if (!on) {   /* grey when off */
+        double l = 0.3 * g.red + 0.59 * g.green + 0.11 * g.blue;
+        g.red = g.green = g.blue = 0.35 + l * 0.4;
     }
-    return name;
+    g_autofree char *glow = gdk_rgba_to_string(&g);
+    cairo_surface_t *cs = vortex_icon_surface(16, 4, on ? "#6a4a7a" : "#5a5a5a", glow);
+    cairo_surface_write_to_png(cs, path);
+    cairo_surface_destroy(cs);
+    return path;
 }
+
+static void tray_theme_changed(void) { tray_gen++; }
 #endif
 
 static void tray_update(void)
@@ -889,9 +906,8 @@ static void on_lang(GtkComboBox *c, gpointer ud)
     ui_toast(N_("Язык сменится после перезапуска", "Language changes after restart"));
 }
 
-static void on_bool(GtkSwitch *sw, GParamSpec *ps, gpointer field)
+static void on_bool(gboolean *field)
 {
-    *(gboolean *)field = gtk_switch_get_active(sw);
     settings_save();
     if (field == &S.auto_skip_region) { rebuild_proxies(); core_restart(); }
     if (field == &S.animations) {
@@ -899,12 +915,33 @@ static void on_bool(GtkSwitch *sw, GParamSpec *ps, gpointer field)
         gtk_stack_set_transition_type(GTK_STACK(stack), S.animations
             ? GTK_STACK_TRANSITION_TYPE_CROSSFADE : GTK_STACK_TRANSITION_TYPE_NONE);
     }
+    if (field == &S.eco_fps && S.animations) vortex_set_animated(h_vortex, TRUE);   /* re-pick the clock */
 }
 
-static void on_port(GtkSpinButton *sb, gpointer field)
+/* port fields are plain entries: GtkSpinButton's +/- icons are SVGs, and
+ * loading any image through gdk-pixbuf spawns glycin sandboxes (~40 MB) */
+static void on_port(GtkEntry *e, gpointer field)
 {
-    *(int *)field = gtk_spin_button_get_value_as_int(sb);
+    const char *t = gtk_entry_get_text(e);
+    char *end = NULL;
+    long v = strtol(t, &end, 10);
+    gboolean ok = t[0] && end && !*end && v >= 1024 && v <= 65535;
+    set_class(GTK_WIDGET(e), "error", !ok);
+    if (!ok || *(int *)field == v) return;
+    *(int *)field = (int)v;
     settings_save();
+}
+
+static GtkWidget *port_entry(int *field)
+{
+    GtkWidget *e = gtk_entry_new();
+    g_autofree char *t = g_strdup_printf("%d", *field);
+    gtk_entry_set_text(GTK_ENTRY(e), t);
+    gtk_entry_set_width_chars(GTK_ENTRY(e), 6);
+    gtk_entry_set_max_length(GTK_ENTRY(e), 5);
+    gtk_entry_set_input_purpose(GTK_ENTRY(e), GTK_INPUT_PURPOSE_DIGITS);
+    g_signal_connect(e, "changed", G_CALLBACK(on_port), field);
+    return e;
 }
 
 static void on_tun_setup(GtkButton *b, gpointer ud)
@@ -935,12 +972,95 @@ static GtkWidget *setting_row(const char *title, const char *hint, GtkWidget *ct
     return h;
 }
 
+/* Toggle drawn with cairo. GtkSwitch loads its on/off glyphs as PNG
+ * resources, and on systems where gdk-pixbuf uses glycin every image load
+ * spawns sandboxed helper processes (~40 MB). This one costs nothing and
+ * follows the theme (square in pixel themes). */
+typedef struct { gboolean *field; double pos; guint tick; } Toggle;
+
+static gboolean toggle_tick(GtkWidget *w, GdkFrameClock *fc, gpointer ud)
+{
+    Toggle *t = g_object_get_data(G_OBJECT(w), "tg");
+    double target = *t->field ? 1 : 0;
+    t->pos += (target - t->pos) * (S.animations ? 0.28 : 1);
+    if (fabs(t->pos - target) < 0.01) { t->pos = target; t->tick = 0; gtk_widget_queue_draw(w); return G_SOURCE_REMOVE; }
+    gtk_widget_queue_draw(w);
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean toggle_draw(GtkWidget *w, cairo_t *cr, gpointer ud)
+{
+    Toggle *t = g_object_get_data(G_OBJECT(w), "tg");
+    const Theme *th = theme_current();
+    GdkRGBA off, on, knob;
+    gdk_rgba_parse(&off, th->c[TC_LINE]);
+    gdk_rgba_parse(&on, th->c[TC_ACCENT]);
+    gdk_rgba_parse(&knob, "#ffffff");
+    double W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
+    double tw = 44, thh = 24, x = (W - tw) / 2, y = (H - thh) / 2, p = t->pos;
+    double r = th->pixel ? 0 : thh / 2;
+    cairo_set_source_rgba(cr, off.red + (on.red - off.red) * p, off.green + (on.green - off.green) * p,
+                          off.blue + (on.blue - off.blue) * p, 1);
+    if (r > 0) {
+        cairo_new_sub_path(cr);
+        cairo_arc(cr, x + r, y + r, r, G_PI / 2, 3 * G_PI / 2);
+        cairo_arc(cr, x + tw - r, y + r, r, -G_PI / 2, G_PI / 2);
+        cairo_close_path(cr);
+    } else cairo_rectangle(cr, x, y, tw, thh);
+    cairo_fill(cr);
+    double k = thh - 6, kx = x + 3 + (tw - 6 - k) * p;
+    gdk_cairo_set_source_rgba(cr, &knob);
+    if (r > 0) cairo_arc(cr, kx + k / 2, y + 3 + k / 2, k / 2, 0, 2 * G_PI);
+    else cairo_rectangle(cr, kx, y + 3, k, k);
+    cairo_fill(cr);
+    if (gtk_widget_has_visible_focus(w)) {
+        cairo_set_line_width(cr, 1);
+        gdk_cairo_set_source_rgba(cr, &on);
+        cairo_rectangle(cr, x - 2.5, y - 2.5, tw + 5, thh + 5);
+        cairo_stroke(cr);
+    }
+    return TRUE;
+}
+
+static void toggle_flip(GtkWidget *w)
+{
+    Toggle *t = g_object_get_data(G_OBJECT(w), "tg");
+    *t->field = !*t->field;
+    if (!t->tick) t->tick = gtk_widget_add_tick_callback(w, toggle_tick, NULL, NULL);
+    on_bool(t->field);
+}
+
+static gboolean toggle_click(GtkWidget *w, GdkEventButton *e, gpointer ud)
+{
+    if (e->button == 1 && e->type == GDK_BUTTON_RELEASE) toggle_flip(w);
+    return TRUE;
+}
+
+static gboolean toggle_key(GtkWidget *w, GdkEventKey *e, gpointer ud)
+{
+    if (e->keyval == GDK_KEY_space || e->keyval == GDK_KEY_Return || e->keyval == GDK_KEY_KP_Enter) {
+        toggle_flip(w);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static GtkWidget *sw_for(gboolean *field)
 {
-    GtkWidget *s = gtk_switch_new();
-    gtk_switch_set_active(GTK_SWITCH(s), *field);
-    g_signal_connect(s, "notify::active", G_CALLBACK(on_bool), field);
-    return s;
+    GtkWidget *w = gtk_drawing_area_new();
+    Toggle *t = g_new0(Toggle, 1);
+    t->field = field;
+    t->pos = *field ? 1 : 0;
+    g_object_set_data_full(G_OBJECT(w), "tg", t, g_free);
+    gtk_widget_set_size_request(w, 52, 30);
+    gtk_widget_set_can_focus(w, TRUE);
+    gtk_widget_add_events(w, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_KEY_PRESS_MASK);
+    g_signal_connect(w, "draw", G_CALLBACK(toggle_draw), NULL);
+    g_signal_connect(w, "button-release-event", G_CALLBACK(toggle_click), NULL);
+    g_signal_connect(w, "key-press-event", G_CALLBACK(toggle_key), NULL);
+    AtkObject *acc = gtk_widget_get_accessible(w);
+    if (acc) atk_object_set_role(acc, ATK_ROLE_TOGGLE_BUTTON);
+    return w;
 }
 
 static GtkWidget *page_settings(void)
@@ -974,6 +1094,9 @@ static GtkWidget *page_settings(void)
     fill_themes();
     gtk_box_pack_start(GTK_BOX(c), st_themes, FALSE, FALSE, 4);
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Анимации", "Animations"), NULL, sw_for(&S.animations)), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Экономный режим анимации", "Economy animation mode"),
+        N_("Вращение в покое 20 кадров/с вместо частоты экрана: меньше нагрузка на процессор, но не так плавно.",
+           "Idle orbit at 20 fps instead of the display rate: less CPU, less smooth."), sw_for(&S.eco_fps)), FALSE, FALSE, 0);
     GtkWidget *lang = gtk_combo_box_text_new();
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "auto", N_("Системный", "System"));
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(lang), "ru", "Русский");
@@ -1030,14 +1153,10 @@ static GtkWidget *page_settings(void)
     c = card();
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Подключаться при запуске", "Connect on launch"), NULL, sw_for(&S.autoconnect)), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Запускаться свёрнутым в трей", "Start minimised to tray"), NULL, sw_for(&S.start_hidden)), FALSE, FALSE, 0);
-    GtkWidget *port = gtk_spin_button_new_with_range(1024, 65535, 1);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(port), S.port);
-    g_signal_connect(port, "value-changed", G_CALLBACK(on_port), &S.port);
+    GtkWidget *port = port_entry(&S.port);
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Порт прокси (HTTP + SOCKS5)", "Proxy port (HTTP + SOCKS5)"),
         N_("Применится при следующем подключении.", "Applies on next connect."), port), FALSE, FALSE, 0);
-    GtkWidget *aport = gtk_spin_button_new_with_range(1024, 65535, 1);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(aport), S.api_port);
-    g_signal_connect(aport, "value-changed", G_CALLBACK(on_port), &S.api_port);
+    GtkWidget *aport = port_entry(&S.api_port);
     gtk_box_pack_start(GTK_BOX(c), setting_row(N_("Порт Clash API", "Clash API port"), NULL, aport), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), c, FALSE, FALSE, 0);
 
@@ -1061,12 +1180,13 @@ static GtkWidget *page_about(void)
 
     GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
     const Theme *th = theme_current();
-    g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 5, th->c[TC_INK], th->c[TC_GLOW]);
-    gtk_box_pack_start(GTK_BOX(head), gtk_image_new_from_pixbuf(pb), FALSE, FALSE, 0);
+    cairo_surface_t *ics = vortex_icon_surface(16, 5, "#6a4a7a", th->c[TC_GLOW]);
+    gtk_box_pack_start(GTK_BOX(head), gtk_image_new_from_surface(ics), FALSE, FALSE, 0);
+    cairo_surface_destroy(ics);
     GtkWidget *tv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_widget_set_valign(tv, GTK_ALIGN_CENTER);
     gtk_box_pack_start(GTK_BOX(tv), label("Wellide", "about-title"), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(tv), label(N_("версия " WL_VERSION " · MIT", "version " WL_VERSION " · MIT"), "dim"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tv), label(N_("версия " WL_VERSION " · GPL-3.0-or-later", "version " WL_VERSION " · GPL-3.0-or-later"), "dim"), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(head), tv, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), head, FALSE, FALSE, 0);
 
@@ -1120,7 +1240,14 @@ static GtkWidget *page_about(void)
     gtk_box_pack_start(GTK_BOX(links), btn("sing-box", "flat-btn", G_CALLBACK(on_open_url),
                                            "https://github.com/SagerNet/sing-box"), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), links, FALSE, FALSE, 4);
-    gtk_box_pack_start(GTK_BOX(box), label("© 2026 Wellbou", "dim"), FALSE, FALSE, 0);
+    GtkWidget *lic = label(N_("© 2026 Wellbou. Свободная программа под лицензией GNU GPL версии 3 или более поздней: "
+                              "её можно изменять и распространять, но только с открытым исходным кодом. "
+                              "Без каких-либо гарантий.",
+                              "© 2026 Wellbou. Free software under the GNU GPL version 3 or later: you may modify "
+                              "and share it, but only with the source code. No warranty of any kind."), "dim");
+    gtk_label_set_line_wrap(GTK_LABEL(lic), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(lic), 80);
+    gtk_box_pack_start(GTK_BOX(box), lic, FALSE, FALSE, 0);
 
     gtk_container_add(GTK_CONTAINER(outer), box);
     return outer;
@@ -1154,9 +1281,7 @@ static void on_tray_quit(GtkMenuItem *i, gpointer ud) { do_quit(); }
 
 static void build_tray(void)
 {
-    const char *icon = tray_icon(FALSE);
-    tray = app_indicator_new("wellide", icon, APP_INDICATOR_CATEGORY_COMMUNICATIONS);
-    app_indicator_set_icon_theme_path(tray, tray_dir);
+    tray = app_indicator_new("wellide", tray_icon(FALSE), APP_INDICATOR_CATEGORY_COMMUNICATIONS);
     app_indicator_set_status(tray, APP_INDICATOR_STATUS_ACTIVE);
     app_indicator_set_title(tray, "Wellide");
     GtkWidget *m = gtk_menu_new();
@@ -1198,7 +1323,9 @@ static void on_si_menu(GtkStatusIcon *si, guint button, guint time, gpointer ud)
 static void build_tray(void)
 {
     const Theme *th = theme_current();
-    g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 2, th->c[TC_INK], th->c[TC_GLOW]);
+    cairo_surface_t *cs = vortex_icon_surface(16, 2, "#6a4a7a", th->c[TC_GLOW]);
+    g_autoptr(GdkPixbuf) pb = gdk_pixbuf_get_from_surface(cs, 0, 0, 32, 32);
+    cairo_surface_destroy(cs);
     tray = gtk_status_icon_new_from_pixbuf(pb);
     gtk_status_icon_set_tooltip_text(tray, "Wellide");
     g_signal_connect(tray, "activate", G_CALLBACK(on_si_activate), NULL);
@@ -1249,11 +1376,21 @@ static void on_activate(GtkApplication *a, gpointer ud)
     win = gtk_application_window_new(a);
     gtk_window_set_title(GTK_WINDOW(win), "Wellide");
     gtk_window_set_default_size(GTK_WINDOW(win), 880, 640);
-    gtk_window_set_icon_name(GTK_WINDOW(win), "wellide");
+    /* panel icon: the installed "wellide" icon, matched via the .desktop file */
+    /* The panel takes the icon from the .desktop file (matched by
+     * WM_CLASS); the window icon itself is drawn with cairo so GTK does
+     * not load PNGs through gdk-pixbuf's sandboxed glycin helpers. */
     {
-        const Theme *th = theme_current();
-        g_autoptr(GdkPixbuf) pb = vortex_icon_pixbuf(16, 8, th->c[TC_INK], th->c[TC_GLOW]);
-        gtk_window_set_icon(GTK_WINDOW(win), pb);
+        GList *icons = NULL;
+        const int sizes[] = { 16, 32, 48, 64 };
+        for (guint i = 0; i < G_N_ELEMENTS(sizes); i++) {
+            int px = sizes[i] / 16;
+            cairo_surface_t *cs = vortex_icon_surface(16, px, "#6a4a7a", "#ca31cc");
+            icons = g_list_append(icons, gdk_pixbuf_get_from_surface(cs, 0, 0, sizes[i], sizes[i]));
+            cairo_surface_destroy(cs);
+        }
+        gtk_window_set_icon_list(GTK_WINDOW(win), icons);
+        g_list_free_full(icons, g_object_unref);
     }
     g_signal_connect(win, "delete-event", G_CALLBACK(on_delete), NULL);
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Profiles: subscription URL or pasted links. Stored as
  *   ~/.config/wellide/profiles.json   (metadata)
  *   ~/.config/wellide/profiles/<id>.txt (raw subscription body)

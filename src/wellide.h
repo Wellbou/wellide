@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
 #include <gtk/gtk.h>
@@ -59,6 +60,7 @@ typedef struct {
     gboolean autoconnect;
     gboolean start_hidden;
     gboolean animations;
+    gboolean eco_fps;     /* idle button at 20 fps instead of the display rate */
     char *active;     /* profile id */
     char *selected;   /* outbound tag or "auto" */
     gboolean sysproxy_set;   /* crash recovery marker */
@@ -127,7 +129,7 @@ typedef enum {
 } ThemeColor;
 
 /* every theme has its own connect button */
-typedef enum { BTN_PIXEL, BTN_SKETCH, BTN_NEBULA, BTN_DIAL } ButtonStyle;
+typedef enum { BTN_PIXEL, BTN_SKETCH, BTN_CRYSTAL, BTN_DIAL } ButtonStyle;
 
 typedef struct {
     char *id, *name;
@@ -153,7 +155,7 @@ void vortex_set_label(GtkWidget *w, const char *text);
 void vortex_set_animated(GtkWidget *w, gboolean on);
 void vortex_on_click(GtkWidget *w, void (*cb)(void));
 void vortex_paint_preview(cairo_t *cr, const Theme *t, double size);
-GdkPixbuf *vortex_icon_pixbuf(int cells, int px, const char *ink, const char *glow);
+cairo_surface_t *vortex_icon_surface(int cells, int px, const char *ink, const char *glow);
 gpointer vortex_sim_new(const Theme *t, const char *label);
 void vortex_sim_step(gpointer sim, gint64 t_us);
 void vortex_sim_state(gpointer sim, CoreState st, const char *label);

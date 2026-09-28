@@ -201,7 +201,7 @@ def themes_card(lang="en"):
     """Each theme with its own button, rendered by the app (tools/render --still)."""
     import base64
     names = {"void": "Void", "notebook": "Тетрадь" if lang == "ru" else "Notebook",
-             "purple": "Фиолетовая" if lang == "ru" else "Purple", "graphite": "Графит" if lang == "ru" else "Graphite"}
+             "purple": "Аметист" if lang == "ru" else "Amethyst", "graphite": "Графит" if lang == "ru" else "Graphite"}
     fd = os.environ.get("WL_STILLS", "")
     W, H = 960, 270
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {W} {H}">']
@@ -220,10 +220,10 @@ def themes_card(lang="en"):
 
 def ram_chart():
     """Measured RSS on Arch/KDE, connected in TUN mode (see README)."""
-    # RSS, Arch + KDE, TUN connected. GUI private memory is ~38 MB; the rest is shared GTK libs.
-    rows = [("wellide (GTK UI)", 92, GLOW), ("sing-box core", 61, "#8a4fa0"), ("total", 153, "#f1e6f5")]
+    # RSS, Arch + KDE, TUN connected. GUI private memory is ~17 MB; the rest is shared GTK libs.
+    rows = [("wellide (GTK UI)", 67, GLOW), ("sing-box core", 61, "#8a4fa0"), ("total", 128, "#f1e6f5")]
     W, H = 760, 40 + len(rows) * 46
-    mx = 180
+    mx = 150
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" shape-rendering="crispEdges">',
            f'<rect width="{W}" height="{H}" rx="14" fill="{BG}"/>']
     for i, (nm, mb, col) in enumerate(rows):

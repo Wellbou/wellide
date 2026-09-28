@@ -10,5 +10,5 @@ Icon=wellide
 Terminal=false
 Categories=Network;
 Keywords=vpn;proxy;sing-box;vless;hiddify;
-StartupWMClass=io.github.wellbou.wellide
+StartupWMClass=wellide
 MimeType=x-scheme-handler/wellide;

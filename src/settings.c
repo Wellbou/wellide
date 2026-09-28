@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wellide.h"
 #include <string.h>
 
@@ -98,6 +99,7 @@ void settings_load(void)
     S.autoconnect = kf_bool(kf, "autoconnect", FALSE);
     S.start_hidden = kf_bool(kf, "start_hidden", FALSE);
     S.animations = kf_bool(kf, "animations", TRUE);
+    S.eco_fps = kf_bool(kf, "eco_fps", FALSE);
     S.active = kf_str(kf, "active", "");
     S.selected = kf_str(kf, "selected", "auto");
     S.sysproxy_set = kf_bool(kf, "sysproxy_set", FALSE);
@@ -124,6 +126,7 @@ void settings_save(void)
     g_key_file_set_boolean(kf, "main", "autoconnect", S.autoconnect);
     g_key_file_set_boolean(kf, "main", "start_hidden", S.start_hidden);
     g_key_file_set_boolean(kf, "main", "animations", S.animations);
+    g_key_file_set_boolean(kf, "main", "eco_fps", S.eco_fps);
     g_key_file_set_string(kf, "main", "active", S.active ? S.active : "");
     g_key_file_set_string(kf, "main", "selected", S.selected ? S.selected : "auto");
     g_key_file_set_boolean(kf, "main", "sysproxy_set", S.sysproxy_set);

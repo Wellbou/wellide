@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Traffic sparkline: last 60 s of up/down speed, pixel-stepped bars that
  * slide smoothly between samples (interpolated at frame rate). */
 #include "wellide.h"

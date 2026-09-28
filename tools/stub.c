@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* UI callbacks for tools/render (no window) */
 #include "../src/wellide.h"
 void ui_on_state(CoreState st, const char *e) {}

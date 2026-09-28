@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Themes.
  *
  * Built-in themes are tables below. Custom themes are plain key files in
@@ -24,7 +25,7 @@
  *   outline=false        ; hard ink outlines + offset shadows ("paper" look)
  *   radius=14            ; corner radius of cards, px
  *   pixel=false          ; square corners + stepped pixel borders everywhere
- *   button=pixel         ; connect button look: pixel | sketch | nebula | dial
+ *   button=pixel         ; connect button look: pixel | sketch | crystal | dial
  *
  *   [css]
  *   extra=.h1 { letter-spacing: 2px; }   ; appended GTK CSS
@@ -47,7 +48,7 @@ static void theme_free(Theme *t)
     g_free(t);
 }
 
-static const char *BUTTONS[] = { "pixel", "sketch", "nebula", "dial", NULL };
+static const char *BUTTONS[] = { "pixel", "sketch", "crystal", "dial", NULL };
 
 static Theme *mk(const char *id, const char *name, const char *const cols[TC_N],
                  gboolean ruled, gboolean outline, gboolean pixel, int radius, ButtonStyle btn)
@@ -75,15 +76,17 @@ static void add_builtins(void)
     static const char *notebook[TC_N] = {
         "#fdfdf8", "#f3f1e7", "#ffffff", "#1d2433", "#5d6577", "#1d2433", "#ffffff",
         "#b9c0cf", "#d0342c", "#1d2433", "#b0209f", "#c7d8f4", "#e05a5a" };
+    /* Amethyst: deep aubergine, cool lavender text, a clear violet with a
+     * gold counterpoint (the warm accent keeps it from being "just purple") */
     static const char *purple[TC_N] = {
-        "#130a22", "#1c1030", "#241540", "#ede7f6", "#a594c4", "#ab47bc", "#ffffff",
-        "#3b2960", "#ff5277", "#2a1f38", "#ca31cc", "#000000", "#000000" };
+        "#100b16", "#150f1d", "#1c1427", "#ece4f4", "#9b8cae", "#9a6bff", "#ffffff",
+        "#2f2440", "#ff6b8a", "#3a2a55", "#a77bff", "#e2b659", "#000000" };
     static const char *graphite[TC_N] = {
         "#1b1b1d", "#222225", "#2a2a2e", "#ececec", "#9a9aa2", "#ca31cc", "#ffffff",
         "#3a3a40", "#ff5c5c", "#101012", "#ca31cc", "#000000", "#000000" };
     g_ptr_array_add(THEMES, mk("void", "Void", voidp, FALSE, FALSE, TRUE, 0, BTN_PIXEL));
     g_ptr_array_add(THEMES, mk("notebook", N_("Тетрадь", "Notebook"), notebook, TRUE, TRUE, FALSE, 4, BTN_SKETCH));
-    g_ptr_array_add(THEMES, mk("purple", N_("Фиолетовая", "Purple"), purple, FALSE, FALSE, FALSE, 14, BTN_NEBULA));
+    g_ptr_array_add(THEMES, mk("purple", N_("Аметист", "Amethyst"), purple, FALSE, FALSE, FALSE, 3, BTN_CRYSTAL));
     g_ptr_array_add(THEMES, mk("graphite", N_("Графит", "Graphite"), graphite, FALSE, FALSE, FALSE, 10, BTN_DIAL));
 }
 
@@ -241,6 +244,7 @@ char *theme_css(const Theme *t)
     GString *s = g_string_new(NULL);
     g_string_append_printf(s,
         "* { outline-width: 0; }\n"
+
         /* smooth state changes everywhere; GTK animates colour/shadow/size */
         "button, .nav, row, entry, switch, switch slider, progressbar progress, .card {"
         "   transition: all 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }\n"
@@ -364,6 +368,26 @@ char *theme_css(const Theme *t)
             ".toast { border: 2px solid %s; box-shadow: 4px 4px 0 %s; }\n",
             C(TC_LINE), C(TC_INK), C(TC_ACCENT), C(TC_LINE), C(TC_INK), C(TC_ACCENT), C(TC_ACCENT),
             C(TC_INK), C(TC_INK), C(TC_LINE), C(TC_ACCENT), C(TC_LINE), C(TC_ACCENT), C(TC_INK));
+    }
+    if (t->button == BTN_CRYSTAL) {
+        /* cut-stone UI: bevelled edges lit from the top-left, gold hairline
+         * (TC_RULE) on active elements, tight corners */
+        g_string_append_printf(s,
+            ".card { border: 1px solid %s; border-top-color: alpha(#ffffff, 0.10);"
+            "        border-left-color: alpha(#ffffff, 0.06); border-bottom-color: alpha(#000000, 0.45);"
+            "        box-shadow: inset 0 1px alpha(#ffffff, 0.04), 0 6px 18px -8px alpha(#000000, 0.7); }\n"
+            ".sidebar { border-right: 1px solid %s; }\n"
+            ".nav.active { box-shadow: inset 3px 0 %s; }\n"
+            ".brand { letter-spacing: 3px; }\n"
+            ".h1 { letter-spacing: 1px; }\n"
+            "button.accent-btn { border-bottom: 2px solid shade(%s, 0.7); }\n"
+            "button.accent-btn:active { border-bottom-width: 0; margin-top: 2px; }\n"
+            "row.server.selected-srv { box-shadow: inset 2px 0 %s; }\n"
+            ".theme-card.active { border-color: %s; }\n"
+            "entry:focus { border-color: %s; }\n"
+            "progressbar progress { background-image: linear-gradient(to right, %s, %s); }\n",
+            C(TC_LINE), C(TC_LINE), C(TC_RULE), C(TC_ACCENT), C(TC_RULE), C(TC_RULE), C(TC_ACCENT),
+            C(TC_ACCENT), C(TC_GLOW));
     }
     if (t->css_extra) g_string_append(s, t->css_extra);
 #undef C

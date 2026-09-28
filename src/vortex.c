@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* The connect button.
  *
  * A round power button with the vortex arms orbiting *around* it. The
@@ -10,8 +11,8 @@
  *                       away with the arms; the shock ring crumbles.
  *   SKETCH (Notebook) — pen strokes; the pen circles the button and
  *                       rewrites the label, ink dots splash out.
- *   NEBULA (Purple)   — glowing particles; the core pulses in the theme
- *                       colour and pushes the dust outwards.
+ *   CRYSTAL (Amethyst) — a cut gem with shards for arms; the light spins
+ *                       around the facets and the girdle breaks apart.
  *   DIAL   (Graphite) — calm arcs; an accent arc sweeps around the rim.
  *
  * Animation: GATHER (arms wrap onto the button) → SWITCH (effect, label
@@ -495,80 +496,158 @@ static void sketch_switch(cairo_t *cr, Vortex *v, const Frame *f)
     }
 }
 
-/* ---------- NEBULA (Purple) ---------- */
+/* ---------- CRYSTAL (Amethyst) ----------
+ * The button is a cut gem seen from above: an octagonal table and eight
+ * facets lit from the top-left. The arms are strings of amethyst shards,
+ * each split along its axis into a lit and a shaded half. Switching
+ * spins the light once around the stone, so the facets catch it one
+ * after another, and the octagonal girdle breaks off and flies apart. */
 
-static void nebula_dust(cairo_t *cr, Vortex *v, const Frame *f)
+static double crystal_light(const Vortex *v, const Frame *f)
 {
-    double push = f->sw >= 0 ? sin(G_PI * clamp01(f->sw)) : 0;
-    for (int i = 0; i < 26; i++) {
-        double h = hash01(i, 1), h2 = hash01(i, 2);
-        double r = lerp(lerp(f->rin, f->rout, h), f->rb * 1.15, clamp01(f->g)) + push * f->S * 0.1 * (0.5 + h2);
-        double a = v->phase * (0.6 + h2 * 0.8) + i * 2.399;
-        double tw = 0.35 + 0.65 * (0.5 + 0.5 * sin(now_us() / 1e6 * (1 + h * 2) + i));
-        src(cr, i % 3 ? &v->glow : &WHITE, (0.22 + 0.23 * f->lit) * tw);
-        cairo_arc(cr, f->cx + cos(a) * r, f->cy + sin(a) * r, f->S * (0.004 + 0.004 * h2), 0, 2 * G_PI);
+    double a = -2.25 + v->hover * 0.5;
+    if (f->sw >= 0) a += 2 * G_PI * ease_in_out(clamp01(f->sw / 0.8));
+    return a;
+}
+
+static void shade(GdkRGBA *o, const GdkRGBA *base, const Vortex *v, double facing, double gain)
+{
+    if (facing >= 0) mix(o, base, &WHITE, facing * gain);
+    else mix(o, base, &v->bg, -facing * 0.45);
+}
+
+static void shard(cairo_t *cr, const Vortex *v, double x, double y, double ang, double len, double wid,
+                  const GdkRGBA *base, double light, double gain)
+{
+    double ux = cos(ang), uy = sin(ang), nx = -uy, ny = ux;
+    double ax = x + ux * len / 2, ay = y + uy * len / 2, bx = x - ux * len / 2, by = y - uy * len / 2;
+    for (int side = -1; side <= 1; side += 2) {
+        double fa = cos(atan2(ny * side, nx * side) - light);
+        GdkRGBA c; shade(&c, base, v, fa, gain);
+        src(cr, &c, 1);
+        cairo_move_to(cr, ax, ay);
+        cairo_line_to(cr, x + nx * side * wid / 2, y + ny * side * wid / 2);
+        cairo_line_to(cr, bx, by);
+        cairo_close_path(cr);
         cairo_fill(cr);
     }
 }
 
-static void nebula_arms(cairo_t *cr, Vortex *v, const Frame *f)
+static void crystal_arms(cairo_t *cr, Vortex *v, const Frame *f)
 {
     GdkRGBA ca, cb;
     arm_colors(v, f->lit, &ca, &cb);
-    for (int pass = 0; pass < 2; pass++)
-        for (int k = 0; k < 4; k++) {
-            const GdkRGBA *c = k % 2 ? &cb : &ca;
-            for (int i = 0; i <= 22; i++) {
-                double x, y, w, t = i / 22.0;
-                arm_point(v, f, k, 4, t, &x, &y, &w);
-                if (pass == 0) { src(cr, c, 0.16); cairo_arc(cr, x, y, w * 1.25, 0, 2 * G_PI); }
-                else { src(cr, c, 0.85 * (1 - t * 0.6)); cairo_arc(cr, x, y, MAX(w * 0.32, 1), 0, 2 * G_PI); }
-                cairo_fill(cr);
-            }
+    double light = -2.25;
+    for (int k = 0; k < 4; k++) {
+        const GdkRGBA *c = k % 2 ? &cb : &ca;
+        for (int i = 0; i < 8; i++) {
+            double t = (i + 0.5) / 8, x, y, w, x2, y2, w2;
+            arm_point(v, f, k, 4, t, &x, &y, &w);
+            arm_point(v, f, k, 4, t + 0.02, &x2, &y2, &w2);
+            double ang = atan2(y2 - y, x2 - x);
+            shard(cr, v, x, y, ang, w * 2.3, w * 0.95, c, light, 0.55);
         }
+    }
 }
 
-static void nebula_button(cairo_t *cr, Vortex *v, const Frame *f)
+static void octagon(cairo_t *cr, double cx, double cy, double r)
+{
+    for (int i = 0; i < 8; i++) {
+        double a = G_PI / 8 + i * G_PI / 4;
+        if (i) cairo_line_to(cr, cx + cos(a) * r, cy + sin(a) * r);
+        else cairo_move_to(cr, cx + cos(a) * r, cy + sin(a) * r);
+    }
+    cairo_close_path(cr);
+}
+
+static void crystal_button(cairo_t *cr, Vortex *v, const Frame *f)
 {
     GdkRGBA fill, ring, mark; double ma;
     face_colors(v, f, &fill, &ring, &mark, &ma);
-    double rb = f->rb * (1 - 0.05 * f->press);
-    GdkRGBA hi; mix(&hi, &fill, &WHITE, 0.08 + 0.27 * f->lit);
-    cairo_pattern_t *p = cairo_pattern_create_radial(f->cx - rb * 0.3, f->cy - rb * 0.3, rb * 0.1, f->cx, f->cy, rb);
-    cairo_pattern_add_color_stop_rgba(p, 0, hi.red, hi.green, hi.blue, 1);
-    cairo_pattern_add_color_stop_rgba(p, 1, fill.red, fill.green, fill.blue, 1);
-    cairo_set_source(cr, p);
-    cairo_arc(cr, f->cx, f->cy, rb, 0, 2 * G_PI);
-    cairo_fill_preserve(cr);
-    cairo_pattern_destroy(p);
-    cairo_set_line_width(cr, f->S * 0.006);
+    double rb = f->rb * 1.04 * (1 - 0.05 * f->press), rt = rb * 0.64;
+    double light = crystal_light(v, f), gain = 0.22 + 0.25 * f->lit;
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
+    for (int i = 0; i < 8; i++) {
+        double a0 = G_PI / 8 + i * G_PI / 4, a1 = a0 + G_PI / 4;
+        double facing = cos(a0 + G_PI / 8 - light);
+        GdkRGBA c; shade(&c, &fill, v, facing, gain);
+        src(cr, &c, 1);
+        cairo_move_to(cr, f->cx + cos(a0) * rb, f->cy + sin(a0) * rb);
+        cairo_line_to(cr, f->cx + cos(a1) * rb, f->cy + sin(a1) * rb);
+        cairo_line_to(cr, f->cx + cos(a1) * rt, f->cy + sin(a1) * rt);
+        cairo_line_to(cr, f->cx + cos(a0) * rt, f->cy + sin(a0) * rt);
+        cairo_close_path(cr);
+        cairo_fill(cr);
+    }
+    GdkRGBA table; mix(&table, &fill, &WHITE, 0.05 + 0.05 * f->lit);
+    src(cr, &table, 1);
+    octagon(cr, f->cx, f->cy, rt);
+    cairo_fill(cr);
+    /* facet edges */
+    cairo_set_line_width(cr, MAX(1, f->S * 0.003));
+    GdkRGBA edge; mix(&edge, &ring, &fill, 0.45);
+    src(cr, &edge, 1);
+    for (int i = 0; i < 8; i++) {
+        double a = G_PI / 8 + i * G_PI / 4;
+        cairo_move_to(cr, f->cx + cos(a) * rt, f->cy + sin(a) * rt);
+        cairo_line_to(cr, f->cx + cos(a) * rb, f->cy + sin(a) * rb);
+    }
+    cairo_stroke(cr);
+    octagon(cr, f->cx, f->cy, rt);
+    cairo_stroke(cr);
+    cairo_set_line_width(cr, f->S * 0.007);
     src(cr, &ring, 1);
+    octagon(cr, f->cx, f->cy, rb);
     cairo_stroke(cr);
     paint_face(cr, v, f, "sans", 1);
 }
 
-static void nebula_switch(cairo_t *cr, Vortex *v, const Frame *f)
+/* four-point glints travelling on the shards; drawn live, a few px each */
+static void crystal_glints(cairo_t *cr, Vortex *v, const Frame *f)
+{
+    double now = now_us() / 1e6;
+    for (int k = 0; k < 4; k++) {
+        double ph = fmod(now * 0.45 + k * 0.27, 1.0);
+        if (ph > 0.16) continue;
+        double s = sin(G_PI * ph / 0.16) * f->S * 0.022 * (0.4 + 0.6 * f->lit);
+        double x, y, w;
+        arm_point(v, f, k, 4, 0.18 + 0.1 * (k % 3), &x, &y, &w);
+        src(cr, &WHITE, 1);
+        for (int d = 0; d < 2; d++) {
+            double ux = d ? 0 : 1, uy = d ? 1 : 0;
+            cairo_move_to(cr, x - ux * s, y - uy * s);
+            cairo_line_to(cr, x + uy * s * 0.18, y + ux * s * 0.18);
+            cairo_line_to(cr, x + ux * s, y + uy * s);
+            cairo_line_to(cr, x - uy * s * 0.18, y - ux * s * 0.18);
+            cairo_close_path(cr);
+        }
+        cairo_fill(cr);
+    }
+}
+
+static void crystal_switch(cairo_t *cr, Vortex *v, const Frame *f)
 {
     if (f->sw < 0) return;
     cairo_new_path(cr);
-    double t = f->sw, k = sin(G_PI * clamp01(t));
-    /* the core pulses in the theme colour */
-    cairo_pattern_t *b = cairo_pattern_create_radial(f->cx, f->cy, f->rb * 0.9, f->cx, f->cy, f->rb + f->S * 0.28 * k);
-    cairo_pattern_add_color_stop_rgba(b, 0, v->glow.red, v->glow.green, v->glow.blue, 0.55 * k);
-    cairo_pattern_add_color_stop_rgba(b, 1, v->glow.red, v->glow.green, v->glow.blue, 0);
-    cairo_set_source(cr, b);
-    cairo_arc(cr, f->cx, f->cy, f->rb + f->S * 0.28 * k, 0, 2 * G_PI);
-    cairo_fill(cr);
-    cairo_pattern_destroy(b);
-    /* wave: thins out as it spreads */
-    double rr = f->rb + (f->rout * 1.05 - f->rb) * ease_out(t);
-    double lw = f->S * 0.02 * (1 - t);
-    if (lw > 0.3) {
-        cairo_set_line_width(cr, lw);
-        src(cr, &v->glow, 1);
-        cairo_arc(cr, f->cx, f->cy, rr, 0, 2 * G_PI);
-        cairo_stroke(cr);
+    double t = f->sw;
+    /* the girdle breaks into its eight edges; each flies out and shortens */
+    double rr = f->rb * 1.04 + (f->rout * 1.02 - f->rb) * ease_out(t);
+    double keep = 1 - ease_in_out(clamp01((t - 0.1) / 0.9));
+    if (keep <= 0.02) return;
+    GdkRGBA c; mix(&c, &WHITE, &v->glow, clamp01(t * 1.6));
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+    cairo_set_line_width(cr, f->S * 0.009);
+    src(cr, &c, 1);
+    for (int i = 0; i < 8; i++) {
+        double a0 = G_PI / 8 + i * G_PI / 4, a1 = a0 + G_PI / 4, spin = t * 0.5 * (i % 2 ? 1 : -1);
+        double mx = (cos(a0) + cos(a1)) / 2 * rr, my = (sin(a0) + sin(a1)) / 2 * rr;
+        double hx = (cos(a1) - cos(a0)) / 2 * rr * keep, hy = (sin(a1) - sin(a0)) / 2 * rr * keep;
+        double cs = cos(spin), sn = sin(spin);
+        double ex = hx * cs - hy * sn, ey = hx * sn + hy * cs;
+        cairo_move_to(cr, f->cx + mx - ex, f->cy + my - ey);
+        cairo_line_to(cr, f->cx + mx + ex, f->cy + my + ey);
     }
+    cairo_stroke(cr);
 }
 
 /* ---------- DIAL (Graphite) ---------- */
@@ -694,9 +773,8 @@ static void paint(cairo_t *cr, Vortex *v, double W, double H, gboolean use_cache
     paint_halo(cr, v, &f);
     if (v->style == BTN_PIXEL) { paint_pixel(cr, v, &f); return; }
 
-    PaintFn arms = v->style == BTN_SKETCH ? sketch_arms : v->style == BTN_NEBULA ? nebula_arms : dial_arms;
-    PaintFn button = v->style == BTN_SKETCH ? sketch_button : v->style == BTN_NEBULA ? nebula_button : dial_button;
-    if (v->style == BTN_NEBULA) nebula_dust(cr, v, &f);
+    PaintFn arms = v->style == BTN_SKETCH ? sketch_arms : v->style == BTN_CRYSTAL ? crystal_arms : dial_arms;
+    PaintFn button = v->style == BTN_SKETCH ? sketch_button : v->style == BTN_CRYSTAL ? crystal_button : dial_button;
     /* resting arms are a rigid rotation of one cached image */
     if (use_cache && f.g == 0 && v->style != BTN_DIAL) {
         double p = v->phase;
@@ -716,7 +794,7 @@ static void paint(cairo_t *cr, Vortex *v, double W, double H, gboolean use_cache
     } else button(cr, v, &f);
 
     if (v->style == BTN_SKETCH) sketch_switch(cr, v, &f);
-    else if (v->style == BTN_NEBULA) nebula_switch(cr, v, &f);
+    else if (v->style == BTN_CRYSTAL) { crystal_glints(cr, v, &f); crystal_switch(cr, v, &f); }
     else dial_switch(cr, v, &f);
 }
 
@@ -791,6 +869,7 @@ static void step(Vortex *v, gint64 now)
     }
 }
 
+/* idle = nothing but the slow orbit; only then may the eco timer take over */
 static gboolean is_idle(Vortex *v)
 {
     gboolean busy = v->st == ST_STARTING || v->st == ST_STOPPING;
@@ -808,7 +887,7 @@ static gboolean on_timer(gpointer ud)
     if (!gtk_widget_get_mapped(w) || !v->animated) { v->timer = 0; return G_SOURCE_REMOVE; }
     step(v, now_us());
     gtk_widget_queue_draw(w);
-    if (!is_idle(v)) { v->timer = 0; start_ticking(w); return G_SOURCE_REMOVE; }
+    if (!is_idle(v) || !S.eco_fps) { v->timer = 0; start_ticking(w); return G_SOURCE_REMOVE; }
     return G_SOURCE_CONTINUE;
 }
 
@@ -822,7 +901,7 @@ static gboolean on_tick(GtkWidget *w, GdkFrameClock *fc, gpointer ud)
     }
     step(v, now_us());
     gtk_widget_queue_draw(w);
-    if (is_idle(v) && v->animated) {
+    if (S.eco_fps && is_idle(v) && v->animated) {
         v->tick = 0;
         if (!v->timer) v->timer = g_timeout_add(50, on_timer, w);
         return G_SOURCE_REMOVE;
@@ -1064,7 +1143,7 @@ static int field(double n, double x, double y)
     return (seg - i) < 0.55 ? (i % 2 == 0 ? 1 : 2) : 0;
 }
 
-GdkPixbuf *vortex_icon_pixbuf(int cells, int px, const char *ink, const char *glow)
+cairo_surface_t *vortex_icon_surface(int cells, int px, const char *ink, const char *glow)
 {
     GdkRGBA k, g;
     parse(&k, ink, "#553d63");
@@ -1081,7 +1160,5 @@ GdkPixbuf *vortex_icon_pixbuf(int cells, int px, const char *ink, const char *gl
             }
         }
     cairo_destroy(cr);
-    GdkPixbuf *pb = gdk_pixbuf_get_from_surface(s, 0, 0, cells * px, cells * px);
-    cairo_surface_destroy(s);
-    return pb;
+    return s;
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* sing-box process management + Clash API client. */
 #include "wellide.h"
 #include <gio/gio.h>

@@ -50,7 +50,7 @@ Every theme has its own button look and switch effect:
 |---|---|---|
 | **Void** (default) | pixel grid | a white star bursts, burns out from the centre and breaks into sparks |
 | **Notebook** | ink strokes on ruled paper | the pen redraws the outline, ink splashes |
-| **Purple** | glowing particles | the core pulses and pushes the dust outwards |
+| **Amethyst** | a cut gem; the arms are strings of shards | the light sweeps once around the facets and the rim breaks into flying edges |
 | **Graphite** | calm arcs | an accent arc sweeps around the rim |
 
 ### Custom themes
@@ -61,7 +61,7 @@ Put an `.ini` file into `~/.config/wellide/themes/` (on Windows, `%LOCALAPPDATA%
 [theme]
 name=Midnight
 base=void            ; inherit everything you don't set
-button=pixel         ; pixel | sketch | nebula | dial
+button=pixel         ; pixel | sketch | crystal | dial
 bg=#101018           ; window
 bg2=#16161f          ; sidebar
 card=#1d1d29
@@ -89,7 +89,7 @@ file=midnight.css    ; any GTK3 CSS, loaded after the theme
 
 Measured on Arch with KDE, connected in TUN mode:
 
-- **Memory:** the numbers above are RSS. Only about 38 MB of the UI's memory is its own; the rest is GTK libraries shared with other apps.
+- **Memory:** the numbers above are RSS. Only about 17 MB of the UI's memory is its own; the rest is GTK libraries shared with other apps. Wellide never loads images through gdk-pixbuf (which spawns sandboxed helper processes on newer distros): every icon and switch is drawn with cairo.
 - **Idle CPU:** usually 1–3 % with the window open. Measurements were noisy, and single runs sometimes showed 6–15 %.
 - **Hidden in the tray:** the button and graph stop drawing.
 - **How the button stays cheap:** the idle orbit redraws at 20 fps, and the arms are a cached image that is rotated rather than redrawn.
@@ -119,4 +119,4 @@ The Windows build runs in GitHub Actions: MSYS2 UCRT64 for the app, NSIS for the
 
 ## License
 
-MIT
+[GPL-3.0-or-later](LICENSE). You may use, study, share and modify Wellide, but any distributed version — including forks and rebrands — must stay open source under the same licence.

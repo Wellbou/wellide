@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Share-link parser: vless / vmess / trojan / ss / hysteria2 / tuic
  * -> sing-box outbound objects. Also accepts base64-wrapped lists and
  * raw sing-box JSON ({"outbounds":[...]}) subscriptions. */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Offline renderer: plays the real button animation with a fake clock
  * and writes PNG frames.  make tools/render && tools/render <theme> <outdir> */
 #include "../src/wellide.h"

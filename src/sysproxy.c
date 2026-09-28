@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* System proxy for KDE (kioslaverc) and GNOME (gsettings). Firefox,
  * Chromium, Telegram etc. follow these when set to "system proxy".
  * Previous values are stored in settings so a crash can be undone on the

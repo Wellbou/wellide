@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Wellide installer for Linux.
 #   curl -fsSL https://raw.githubusercontent.com/Wellbou/wellide/main/install.sh | sh
 # Options: --no-tun (skip TUN permissions)  --uninstall

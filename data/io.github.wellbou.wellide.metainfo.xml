@@ -11,5 +11,6 @@
   <description>
     <p>A small GTK client for sing-box: subscriptions, TUN mode, automatic ping and themes, in about 60 MB of RAM.</p>
   </description>
-  <releases><release version="0.2.0" date="2026-09-28"/></releases>
+  <releases><release version="0.2.1" date="2026-10-01"/>
+<release version="0.2.0" date="2026-09-28"/></releases>
 </component>

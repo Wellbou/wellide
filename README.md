@@ -39,7 +39,7 @@ The vortex arms orbit the power button. When you click, they wrap onto it, the t
 - **Auto** picks the server with the lowest ping and re-checks it every 2 minutes. It skips servers in your own country, since those can't get past geo-blocks.
 - **Automatic ping:** TCP connect time while offline, the real delay through the server once connected.
 - **Modes:** TUN (all traffic), system proxy (KDE, GNOME, Windows), or local port only (`127.0.0.1:12400`, HTTP and SOCKS5).
-- **Local sites go direct:** optional split routing for 🇷🇺 Russia, 🇮🇷 Iran and 🇨🇳 China, based on sing-geoip and sing-geosite rules.
+- **Local sites go direct:** optional split routing for Russia, Iran and China, based on sing-geoip and sing-geosite rules.
 - **Traffic graph** and a tray icon. The UI is in English and Russian, chosen from the system locale.
 
 ## Themes

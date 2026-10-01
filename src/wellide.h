@@ -10,7 +10,7 @@
 #include <unistd.h>
 #endif
 
-#define WL_VERSION "0.2.0"
+#define WL_VERSION "0.2.1"
 #define WL_APP_ID  "io.github.wellbou.wellide"
 #define WL_REPO    "https://github.com/Wellbou/wellide"
 /* sing-box shipped inside the .deb (no capabilities; TUN setup copies it) */

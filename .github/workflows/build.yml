@@ -74,6 +74,10 @@ jobs:
           # every DLL the binary (transitively) needs from the UCRT64 prefix
           for f in $(ldd wellide.exe | awk '/ucrt64/ {print $3}'); do cp "$f" $D/bin/; done
           cp /ucrt64/bin/gdbus.exe $D/bin/ || true
+          # GLib spawns these to run subprocesses with child watching (sing-box!);
+          # ldd does not list them, and without them every connect fails with
+          # "Failed to execute helper program (No such file or directory)"
+          cp /ucrt64/bin/gspawn-win64-helper.exe /ucrt64/bin/gspawn-win64-helper-console.exe $D/bin/
           # TLS for libsoup + pixbuf loaders + schemas + icons
           cp -r /ucrt64/lib/gio $D/lib/
           for f in /ucrt64/lib/gio/modules/*.dll; do for d in $(ldd "$f" | awk '/ucrt64/ {print $3}'); do cp -n "$d" $D/bin/; done; done

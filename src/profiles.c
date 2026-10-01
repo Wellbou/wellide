@@ -114,6 +114,7 @@ void profiles_save(void)
     }
     json_builder_end_array(b);
     g_autoptr(JsonGenerator) g = json_generator_new();
+    if (!g) return;   /* type system broken: skip the save, keep the old file */
     json_generator_set_pretty(g, TRUE);
     g_autoptr(JsonNode) root = json_builder_get_root(b);
     json_generator_set_root(g, root);

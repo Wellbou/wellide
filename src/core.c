@@ -416,7 +416,14 @@ static char *build_config(Profile *p, GError **err)
     g_autoptr(JsonNode) root = json_builder_get_root(b);
     json_generator_set_root(g, root);
     json_generator_set_pretty(g, TRUE);
-    return json_generator_to_data(g, NULL);
+    char *out = json_generator_to_data(g, NULL);
+    /* if the GObject type system is broken (seen once right after boot:
+     * every constructor returns NULL), say so instead of crashing later */
+    if (!out)
+        g_set_error(err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                    N_("внутренняя ошибка: JSON-сборщик недоступен, попробуйте перезапустить Wellide",
+                       "internal error: JSON builder unavailable, try restarting Wellide"));
+    return out;
 }
 
 /* ---------- process I/O ---------- */
@@ -568,7 +575,10 @@ void core_start(void)
 
     GError *e = NULL;
     g_autofree char *cfg = build_config(p, &e);
-    if (!cfg) { ui_on_state(ST_OFF, e->message); g_error_free(e); return; }
+    if (!cfg) {
+        ui_on_state(ST_OFF, e && e->message ? e->message : N_("не удалось собрать конфиг", "could not build the config"));
+        g_clear_error(&e); return;
+    }
     g_autofree char *dir = wl_cache_dir();
     g_autofree char *path = g_build_filename(dir, "config.json", NULL);
     if (!g_file_set_contents_full(path, cfg, -1, G_FILE_SET_CONTENTS_CONSISTENT, 0600, &e)) {
@@ -650,6 +660,7 @@ void core_select(const char *tag)
     json_builder_end_object(jb);
     g_autoptr(JsonNode) jn = json_builder_get_root(jb);
     g_autofree char *body = json_to_string(jn, FALSE);
+    if (!body) return;
     g_autoptr(GBytes) bb = g_bytes_new(body, strlen(body));
     soup_message_set_request_body_from_bytes(m, "application/json", bb);
     soup_session_send_and_read_async(api_session(), m, G_PRIORITY_DEFAULT, NULL, on_ignore, m);

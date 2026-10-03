@@ -191,6 +191,15 @@ static void add_str_array(JsonBuilder *b, const char *name, const char *const *v
     json_builder_end_array(b);
 }
 
+/* the GObject type system can be broken (seen once right after boot:
+ * every constructor returns NULL): report it instead of crashing */
+static void json_backend_error(GError **err)
+{
+    g_set_error(err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                N_("внутренняя ошибка: JSON-сборщик недоступен, попробуйте перезапустить Wellide",
+                   "internal error: JSON builder unavailable, try restarting Wellide"));
+}
+
 static char *build_config(Profile *p, GError **err)
 {
     int n = profile_server_count(p);
@@ -210,6 +219,7 @@ static char *build_config(Profile *p, GError **err)
     if (strcmp(sel, "auto") && !profile_find_server(p, sel)) sel = "auto";
 
     g_autoptr(JsonBuilder) b = json_builder_new();
+    if (!b) { json_backend_error(err); return NULL; }
     json_builder_begin_object(b);
 
     json_builder_set_member_name(b, "log");
@@ -414,15 +424,11 @@ static char *build_config(Profile *p, GError **err)
 
     g_autoptr(JsonGenerator) g = json_generator_new();
     g_autoptr(JsonNode) root = json_builder_get_root(b);
+    if (!g || !root) { json_backend_error(err); return NULL; }
     json_generator_set_root(g, root);
     json_generator_set_pretty(g, TRUE);
     char *out = json_generator_to_data(g, NULL);
-    /* if the GObject type system is broken (seen once right after boot:
-     * every constructor returns NULL), say so instead of crashing later */
-    if (!out)
-        g_set_error(err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
-                    N_("внутренняя ошибка: JSON-сборщик недоступен, попробуйте перезапустить Wellide",
-                       "internal error: JSON builder unavailable, try restarting Wellide"));
+    if (!out) json_backend_error(err);
     return out;
 }
 
@@ -654,6 +660,7 @@ void core_select(const char *tag)
     SoupMessage *m = soup_message_new("PUT", u);
     /* build with json-glib: g_strescape would mangle UTF-8 (emoji flags) */
     g_autoptr(JsonBuilder) jb = json_builder_new();
+    if (!jb) return;
     json_builder_begin_object(jb);
     json_builder_set_member_name(jb, "name");
     json_builder_add_string_value(jb, tag);

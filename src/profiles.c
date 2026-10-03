@@ -97,6 +97,7 @@ Server *profile_find_server(Profile *p, const char *tag)
 void profiles_save(void)
 {
     g_autoptr(JsonBuilder) b = json_builder_new();
+    if (!b) return;   /* type system broken: keep the old file */
     json_builder_begin_array(b);
     for (guint i = 0; i < PROFILES->len; i++) {
         Profile *p = PROFILES->pdata[i];
@@ -114,9 +115,10 @@ void profiles_save(void)
     }
     json_builder_end_array(b);
     g_autoptr(JsonGenerator) g = json_generator_new();
-    if (!g) return;   /* type system broken: skip the save, keep the old file */
-    json_generator_set_pretty(g, TRUE);
     g_autoptr(JsonNode) root = json_builder_get_root(b);
+    /* type system broken: skip the save, keep the old file */
+    if (!g || !root) return;
+    json_generator_set_pretty(g, TRUE);
     json_generator_set_root(g, root);
     g_autofree char *d = wl_config_dir();
     g_autofree char *f = g_build_filename(d, "profiles.json", NULL);

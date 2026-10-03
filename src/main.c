@@ -1523,7 +1523,9 @@ static int on_command_line(GApplication *a, GApplicationCommandLine *cl, gpointe
             g_application_command_line_print(cl, "%s\t%s\t%s\n",
                 st == ST_ON ? "on" : st == ST_OFF ? "off" : "busy",
                 p ? p->name : "-", S.selected ? S.selected : "auto");
-            ui_only = FALSE;
+            /* print and leave: bringing the window up here would autoconnect
+             * and never exit when no other instance is running */
+            return 0;
         } else if (!strcmp(o, "--hidden")) {
             S.start_hidden = TRUE;
         } else if (!strcmp(o, "--version")) {
